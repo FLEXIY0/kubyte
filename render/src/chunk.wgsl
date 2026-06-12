@@ -35,6 +35,8 @@ struct VsOut {
     @location(2) @interpolate(flat) shade: f32,
     @location(3) dist: f32,
     @location(4) @interpolate(flat) light: vec2<f32>, // sky, block
+    @location(5) world: vec3<f32>,
+    @location(6) @interpolate(flat) nidx: u32,
 };
 
 @vertex
@@ -63,7 +65,18 @@ fn vs_main(@location(0) packed: u32, @location(1) lum: u32) -> VsOut {
     out.shade = SHADE[n];
     out.dist = distance(world, camera.pos_fog.xyz);
     out.light = vec2(f32(lum & 15u), f32(lum >> 4u)) / 15.0;
+    out.world = world;
+    out.nidx = n;
     return out;
+}
+
+// Хеш позиции блока → вариант текстуры (§5): хаос, но контролируемый.
+// Считается в шейдере — варианты не стоят ни памяти, ни вершин, greedy
+// сливает грани как раньше. Чисто визуально, бит-точность не нужна (§6).
+fn variant_of(p: vec3<i32>) -> u32 {
+    var h = u32(p.x) * 0x8DA6B343u ^ u32(p.y) * 0xD8163841u ^ u32(p.z) * 0xCB1AB31Fu;
+    h = (h ^ (h >> 13u)) * 0x9E3779B1u;
+    return (h >> 16u) & 15u;
 }
 
 // Кривая уровней «в духе беты»: каждая ступень темнее в ~0.8 раза.
@@ -73,7 +86,12 @@ fn curve(v: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let albedo = textureSample(tex, samp, fract(in.uv), in.layer).rgb;
+    // Блок, которому принадлежит грань: полшага внутрь против нормали.
+    // Слитый greedy-квад распадается на блоки с разными вариантами здесь,
+    // в пикселе, а не в геометрии.
+    let block = vec3<i32>(floor(in.world - NORMALS[in.nidx] * 0.5));
+    let layer = in.layer * 16u + variant_of(block);
+    let albedo = textureSample(tex, samp, fract(in.uv), layer).rgb;
     // Два света складываются цветом: холодное небо против тёплого янтаря —
     // «дом милый дом» как контраст температур (§6, §14).
     let lit = curve(in.light.x) * camera.sun.a * camera.sun.rgb

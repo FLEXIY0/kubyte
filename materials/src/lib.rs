@@ -15,6 +15,17 @@ pub const TEX_SIZE: usize = 16;
 /// Размер одной текстуры в байтах (RGBA8).
 pub const TEX_BYTES: usize = TEX_SIZE * TEX_SIZE * 4;
 
+/// Вариантов на материал (§5, базовый режим): каждый блок в мире — та же
+/// суть, но своё расположение пикселей. Вариант нигде не хранится: рендер
+/// выводит его из мировой позиции блока (мир-как-функция, §1).
+pub const VARIANTS: usize = 16;
+
+/// Сид варианта текстуры: материал × вариант → свой шумовой мир.
+/// Фиксированная формула — texture array одинаков у всех игроков (§5).
+pub const fn variant_seed(layer: usize, variant: usize) -> u64 {
+    kb_core::splitmix64(((layer as u64) << 8) | variant as u64)
+}
+
 /// Дескриптор материала. Это *данные*, а не код (§1): новый материал —
 /// новая константа в таблице, генератор один на всех.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,6 +195,9 @@ fn value_noise(seed: u64, x: u32, y: u32, cell_log2: u8) -> i32 {
 /// и «зерно», оставаясь в рамках инварианта ±15%.
 pub fn bake(desc: &Descriptor, seed: u64) -> [u8; TEX_BYTES] {
     let mut out = [0u8; TEX_BYTES];
+    // Тон варианта: лёгкий общий сдвиг яркости ±5% — варианты блока
+    // различимы и в упор, и силуэтом издалека, оставаясь «той же сутью».
+    let tone = (hash2(seed, -1, -1) & 31) as i32 - 16;
     for y in 0..TEX_SIZE as u32 {
         for x in 0..TEX_SIZE as u32 {
             let structure = value_noise(seed, x, y, desc.cell_log2);
@@ -217,7 +231,7 @@ pub fn bake(desc: &Descriptor, seed: u64) -> [u8; TEX_BYTES] {
 
             // Зерно: независимый сид, знаковое отклонение яркости −v..=+v.
             let grain = (hash2(seed ^ 0xA5A5, x as i32, y as i32) & 0xFF) as i32;
-            let bright = 256 + ((grain - 128) * desc.variation as i32) / 128;
+            let bright = 256 + tone + ((grain - 128) * desc.variation as i32) / 128;
             let px = &mut out[((y as usize * TEX_SIZE + x as usize) * 4)..][..4];
             for (dst, &c) in px[..3].iter_mut().zip(&color) {
                 *dst = ((c as i32 * bright) >> 8).clamp(0, 255) as u8;
@@ -244,7 +258,6 @@ mod tests {
 
     /// Зафиксированный хеш эталонной текстуры. Меняется только вместе
     /// с версией генератора (§4).
-    // Обновлён вместе с редизайном текстур «под бету» (мир ещё не имеет
-    // публичных сейвов — менять эталон до альфы законно).
-    const GOLDEN_STONE_42: u64 = 867192019363213887;
+    // Обновлён вместе с тоном вариантов (§5). Менять эталон до альфы законно.
+    const GOLDEN_STONE_42: u64 = 13623330163264351272;
 }

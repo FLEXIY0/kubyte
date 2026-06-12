@@ -78,7 +78,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         if slot >= 0 && slot < 9 && all(local >= vec2(0.0)) && all(local < vec2(16.0)) {
             let layer = SLOT_LAYERS[slot];
             if layer >= 0 {
-                let texel = textureSampleLevel(atlas, samp, (local + 0.5) / 16.0, u32(layer), 0.0);
+                // Иконка — вариант 0 (атлас хранит по 16 вариантов на материал).
+                let texel =
+                    textureSampleLevel(atlas, samp, (local + 0.5) / 16.0, u32(layer) * 16u, 0.0);
                 color = mix(color, texel.rgb, 1.0);
             }
         }

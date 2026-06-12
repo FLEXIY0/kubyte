@@ -75,7 +75,8 @@ impl Mobs {
             let swing = (age * 8.0).sin() * 0.7 * pace;
             match m.kind {
                 MobKind::Pig => {
-                    let skin = kb_materials::PIG_LAYER;
+                    // Кожа — вариант 0 материала (атлас хранит ×16 вариантов).
+                    let skin = kb_materials::PIG_LAYER * kb_materials::VARIANTS as u32;
                     // Тело 10×8×16 пикселей, лежит; ноги 4×6×4 по углам.
                     out.push((math::mob_part(p, yaw, [0.625, 0.5, 1.0], [0.0, 0.625, 0.0]), skin));
                     out.push((
@@ -97,7 +98,7 @@ impl Mobs {
                     }
                 }
                 MobKind::Zombie => {
-                    let skin = kb_materials::ZOMBIE_LAYER;
+                    let skin = kb_materials::ZOMBIE_LAYER * kb_materials::VARIANTS as u32;
                     // Гуманоид: голова 8³, торс 8×12×4, конечности 4×12×4.
                     out.push((math::mob_part(p, yaw, [0.5, 0.5, 0.5], [0.0, 1.75, 0.0]), skin));
                     out.push((math::mob_part(p, yaw, [0.5, 0.75, 0.25], [0.0, 1.125, 0.0]), skin));

@@ -283,12 +283,17 @@ impl Gfx {
         config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&device, &config);
 
-        // --- Texture array всех материалов (§5): печётся при старте ------
-        let layers = kb_materials::TEXTURES.len() as u32;
+        // --- Texture array всех материалов (§5): печётся при старте.
+        // Каждый материал — VARIANTS вариантов подряд: «та же суть, другие
+        // пиксели». Слой = материал × VARIANTS + вариант.
+        let layers = (kb_materials::TEXTURES.len() * kb_materials::VARIANTS) as u32;
         let pixels: Vec<u8> = kb_materials::TEXTURES
             .iter()
-            // Сид 0 — фиксированный сид текстур (§5): одинаково у всех.
-            .flat_map(|d| kb_materials::bake(d, 0))
+            .enumerate()
+            .flat_map(|(i, d)| {
+                (0..kb_materials::VARIANTS)
+                    .flat_map(move |v| kb_materials::bake(d, kb_materials::variant_seed(i, v)))
+            })
             .collect();
         let texture = device.create_texture_with_data(
             &queue,
