@@ -235,6 +235,7 @@ pub struct Gfx {
     camera_buf: wgpu::Buffer,
     origins_buf: wgpu::Buffer,
     quad_indices: wgpu::Buffer,
+    sky_pipeline: wgpu::RenderPipeline,
     cloud_pipeline: wgpu::RenderPipeline,
     entity_pipeline: wgpu::RenderPipeline,
     parts_bind: wgpu::BindGroup,
@@ -443,6 +444,45 @@ impl Gfx {
             cache: None,
         });
 
+        // --- Небесные тела: солнце и луна биллбордами --------------------
+        let sky_shader = device.create_shader_module(wgpu::include_wgsl!("sky.wgsl"));
+        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky.pipeline"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[Some(&scene_layout)],
+                immediate_size: 0,
+            })),
+            vertex: wgpu::VertexState {
+                module: &sky_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &sky_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: OFFSCREEN_FORMAT,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            // Фон: глубина не пишется и не проверяется — мир закрасит сам.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         // --- Облака: квад вокруг камеры, форма — в пикселе ---------------
         let cloud_shader = device.create_shader_module(wgpu::include_wgsl!("clouds.wgsl"));
         let cloud_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -621,11 +661,18 @@ impl Gfx {
         let offscreen = Offscreen::new(&device, size, &blit_layout, &nearest, &hud_buf, &atlas);
 
         // Спавн — на поверхности в начале координат.
+        // KB_PITCH / KB_YAW (радианы) — отладочный стартовый взгляд (native).
+        #[cfg(not(target_arch = "wasm32"))]
+        let look = |var: &str, default: f32| {
+            std::env::var(var).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let look = |_: &str, default: f32| default;
         let spawn = [8.5, kb_worldgen::height(SEED, 8, 8) as f32 + 1.0, 8.5];
         let camera = Camera {
             pos: [spawn[0], spawn[1] + kb_core::EYE_HEIGHT, spawn[2]],
-            yaw: 0.6,
-            pitch: -0.1,
+            yaw: look("KB_YAW", 0.6),
+            pitch: look("KB_PITCH", -0.1),
         };
 
         Ok(Self {
@@ -643,6 +690,7 @@ impl Gfx {
             camera_buf,
             origins_buf,
             quad_indices,
+            sky_pipeline,
             cloud_pipeline,
             entity_pipeline,
             parts_bind,
@@ -887,8 +935,12 @@ impl Gfx {
                 }),
                 ..Default::default()
             });
-            pass.set_pipeline(&self.chunk_pipeline);
+            // Солнце и луна — фоном, до мира.
             pass.set_bind_group(0, &self.scene_bind, &[]);
+            pass.set_pipeline(&self.sky_pipeline);
+            pass.draw(0..6, 0..2);
+
+            pass.set_pipeline(&self.chunk_pipeline);
             pass.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
             for (i, d) in draws.iter().take(MAX_DRAWS).enumerate() {
                 pass.set_bind_group(1, &self.origin_bind, &[(i * UB_ALIGN) as u32]);

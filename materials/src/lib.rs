@@ -57,35 +57,40 @@ pub enum Overlay {
 // Палитры — «настроение альфы»: трава ярче и сочнее, земля теплее и
 // рыжее, камень светлый и ровный. Сами пиксели — наш генератор.
 
+// Характер шума — «классический»: попиксельное контрастное зерно
+// (cell_log2 = 0 — решётка без интерполяции), узкие насыщенные палитры.
+
 pub const STONE: Descriptor = Descriptor {
-    palette: [[106, 106, 106], [122, 122, 122], [132, 132, 132], [148, 148, 148]],
+    // Светлый ровный серый, лёгкое зерно — камень читается «гладким».
+    palette: [[112, 112, 112], [125, 125, 125], [134, 134, 134], [150, 150, 150]],
     cell_log2: 1,
-    variation: 13,
-    overlay: Overlay::Speckle { color: [94, 94, 94], chance: 34 },
+    variation: 11,
+    overlay: Overlay::Speckle { color: [99, 99, 99], chance: 30 },
 };
 
 pub const DIRT: Descriptor = Descriptor {
-    palette: [[121, 85, 58], [134, 96, 65], [146, 107, 72], [158, 118, 80]],
-    cell_log2: 1,
-    variation: 22,
-    overlay: Overlay::Speckle { color: [96, 66, 44], chance: 58 },
+    palette: [[118, 82, 55], [134, 96, 64], [150, 110, 74], [166, 124, 84]],
+    cell_log2: 0,
+    variation: 30,
+    overlay: Overlay::Speckle { color: [92, 62, 42], chance: 52 },
 };
 
 pub const GRASS_TOP: Descriptor = Descriptor {
-    palette: [[97, 153, 56], [108, 167, 62], [120, 180, 69], [133, 193, 78]],
-    cell_log2: 1,
-    variation: 23,
-    overlay: Overlay::Speckle { color: [86, 138, 50], chance: 46 },
+    // Сочная жёлто-зелёная, высокочастотное зерно на пределе §5 (±15%).
+    palette: [[84, 138, 40], [99, 156, 47], [114, 174, 55], [130, 192, 64]],
+    cell_log2: 0,
+    variation: 38,
+    overlay: Overlay::Speckle { color: [72, 118, 36], chance: 44 },
 };
 
 pub const GRASS_SIDE: Descriptor = Descriptor {
     // Земля с рваной зелёной кромкой сверху: травяной слой «свисает»
     // на бок блока на 2–4 пикселя.
     palette: DIRT.palette,
-    cell_log2: 1,
-    variation: 22,
+    cell_log2: 0,
+    variation: 30,
     overlay: Overlay::TopBand {
-        palette: [[104, 161, 58], [121, 181, 68]],
+        palette: [[95, 152, 46], [115, 176, 56]],
         min_depth: 2,
         max_depth: 4,
     },
@@ -260,7 +265,7 @@ mod tests {
 
     /// Зафиксированный хеш эталонной текстуры. Меняется только вместе
     /// с версией генератора (§4).
-    // Обновлён вместе с палитрами «настроение альфы». До альфы-релиза
+    // Обновлён вместе с «классическим» характером шума. До альфы-релиза
     // менять эталон законно.
-    const GOLDEN_STONE_42: u64 = 4399156644410169279;
+    const GOLDEN_STONE_42: u64 = 2805793822618517939;
 }
