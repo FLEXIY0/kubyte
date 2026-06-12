@@ -19,5 +19,12 @@ fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return textureSample(src, samp, in.uv);
+    var color = textureSample(src, samp, in.uv).rgb;
+    // Прицел-крестик. Размер экрана восстанавливается из производных uv —
+    // ни юниформа, ни знания разрешения не нужно.
+    let px = abs(in.uv - 0.5) / vec2(dpdx(in.uv.x), dpdy(in.uv.y));
+    if (px.x < 1.0 && px.y < 8.0) || (px.y < 1.0 && px.x < 8.0) {
+        color = 1.0 - color; // инверсия читается на любом фоне
+    }
+    return vec4(color, 1.0);
 }

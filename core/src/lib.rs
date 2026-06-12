@@ -11,7 +11,11 @@
 extern crate alloc;
 
 mod chunk;
+mod physics;
+mod raycast;
 pub use chunk::{Block, Chunk, CHUNK_X, CHUNK_Y, CHUNK_Z, CHUNK_VOLUME};
+pub use physics::{Player, EYE_HEIGHT, PLAYER_HEIGHT, PLAYER_WIDTH};
+pub use raycast::raycast;
 
 /// SplitMix64 — финализирующий миксер. Не генератор с состоянием, а чистая
 /// функция: одно и то же входное слово → одно и то же выходное. Именно

@@ -11,6 +11,9 @@ mod world;
 
 use wgpu::util::DeviceExt;
 
+/// Платформе нужен словарь блоков (выбор в хотбаре) без зависимости от ядра.
+pub use kb_core::Block;
+
 /// Во сколько раз offscreen-буфер меньше экрана. Целое — пиксели обязаны
 /// быть одинаковой ширины (integer scaling, §6). Станет настройкой в M4.
 const PIXEL_SCALE: u32 = 3;
@@ -32,6 +35,11 @@ const MAX_DRAWS: usize = 512;
 const MAX_QUADS: usize = 65536;
 /// Выравнивание динамических оффсетов uniform-буфера (минимум WebGL2).
 const UB_ALIGN: usize = 256;
+
+/// Скорость ходьбы — классическая для жанра.
+const WALK_SPEED: f32 = 4.3;
+/// Дистанция взаимодействия (ломание/установка), в блоках.
+const REACH: f32 = 5.0;
 
 /// Свободная камера. float здесь законен: камера — чисто визуальное
 /// состояние клиента, в симуляцию мира не входит (§6).
@@ -60,6 +68,20 @@ impl Camera {
         self.pos[2] += (-c * forward - s * right) * v;
         self.pos[1] += up * v;
     }
+
+    /// Единичный вектор взгляда.
+    fn dir(&self) -> [f32; 3] {
+        let (sy, cy) = self.yaw.sin_cos();
+        let (sp, cp) = self.pitch.sin_cos();
+        [-sy * cp, sp, -cy * cp]
+    }
+}
+
+/// Режим передвижения: выживание (гравитация, коллизии) или полёт-носклип.
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum Mode {
+    Walk,
+    Fly,
 }
 
 /// Offscreen-цель: пересоздаётся при resize, поэтому выделена в свой тип
@@ -141,6 +163,8 @@ pub struct Gfx {
     origins_buf: wgpu::Buffer,
     quad_indices: wgpu::Buffer,
     world: world::World,
+    player: kb_core::Player,
+    pub mode: Mode,
     pub camera: Camera,
 }
 
@@ -372,11 +396,12 @@ impl Gfx {
 
         let offscreen = Offscreen::new(&device, size, &blit_layout, &nearest);
 
-        // Спавн — над поверхностью в начале координат, взгляд чуть вниз.
+        // Спавн — на поверхности в начале координат.
+        let spawn = [8.5, kb_worldgen::height(SEED, 8, 8) as f32 + 1.0, 8.5];
         let camera = Camera {
-            pos: [8.0, kb_worldgen::height(SEED, 8, 8) as f32 + 12.0, 8.0],
+            pos: [spawn[0], spawn[1] + kb_core::EYE_HEIGHT, spawn[2]],
             yaw: 0.6,
-            pitch: -0.35,
+            pitch: -0.1,
         };
 
         Ok(Self {
@@ -395,8 +420,88 @@ impl Gfx {
             origins_buf,
             quad_indices,
             world: world::World::new(SEED),
+            player: kb_core::Player::new(spawn),
+            mode: Mode::Walk,
             camera,
         })
+    }
+
+    /// Шаг геймплея: в Walk — симуляция игрока (§3: физика в /core),
+    /// в Fly — носклип-камера. Камера в Walk прибита к глазам игрока.
+    pub fn tick(&mut self, dt: f32, (forward, right, up): (f32, f32, f32)) {
+        if self.mode == Mode::Fly {
+            return self.camera.fly(forward, right, up, dt);
+        }
+        let (s, c) = self.camera.yaw.sin_cos();
+        let wish = [
+            (-s * forward + c * right) * WALK_SPEED,
+            (-c * forward - s * right) * WALK_SPEED,
+        ];
+        let world = &mut self.world;
+        self.player
+            .step(dt, wish, up > 0.0, |x, y, z| world.block([x, y, z]).solid());
+        self.camera.pos = self.player.pos;
+        self.camera.pos[1] += kb_core::EYE_HEIGHT;
+    }
+
+    /// Переключение полёта; при посадке игрок продолжает с места камеры.
+    pub fn toggle_fly(&mut self) {
+        self.mode = match self.mode {
+            Mode::Fly => {
+                self.player = kb_core::Player::new([
+                    self.camera.pos[0],
+                    self.camera.pos[1] - kb_core::EYE_HEIGHT,
+                    self.camera.pos[2],
+                ]);
+                Mode::Walk
+            }
+            Mode::Walk => Mode::Fly,
+        };
+    }
+
+    /// Клик по миру: `place == None` — сломать блок под прицелом,
+    /// `Some(b)` — поставить к его грани. Установка в собственный AABB
+    /// запрещена — нельзя замуроваться.
+    pub fn interact(&mut self, place: Option<kb_core::Block>) {
+        let world = &mut self.world;
+        let ray = kb_core::raycast(self.camera.pos, self.camera.dir(), REACH, |x, y, z| {
+            world.block([x, y, z]).solid()
+        });
+        let Some((hit, prev)) = ray else { return };
+        match place {
+            None => self.world.set_block(hit, kb_core::Block::Air),
+            Some(b) => {
+                let feet = self.player.pos;
+                let inside = |i: usize, p: i32| {
+                    let half = kb_core::PLAYER_WIDTH / 2.0 + 0.01;
+                    let (lo, hi) = match i {
+                        1 => (feet[1], feet[1] + kb_core::PLAYER_HEIGHT),
+                        _ => (feet[i] - half, feet[i] + half),
+                    };
+                    (p as f32) < hi && (p + 1) as f32 > lo
+                };
+                let overlaps_player = self.mode == Mode::Walk
+                    && (0..3).all(|i| inside(i, prev[i]));
+                if !overlaps_player {
+                    self.world.set_block(prev, b);
+                }
+            }
+        }
+    }
+
+    /// Сейв/загрузка мира (§4): прокидывается платформой в файл или URL.
+    pub fn export_save(&self) -> Vec<u8> {
+        self.world.save()
+    }
+
+    pub fn import_save(&mut self, bytes: &[u8]) -> bool {
+        match world::World::restore(bytes) {
+            Some(w) => {
+                self.world = w;
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {

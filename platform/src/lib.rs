@@ -4,15 +4,20 @@
 
 use std::sync::Arc;
 
-use kb_render::Gfx;
+use kb_render::{Block, Gfx};
 use web_time::Instant;
 use winit::{
     application::ApplicationHandler,
-    event::{DeviceEvent, DeviceId, ElementState, WindowEvent},
+    event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowId},
 };
+
+/// Файл сейва рядом с бинарником (§4: сейв = сид + дифф-лог, < 100 КБ).
+/// Веб-версия получит «мир-в-URL» отдельным механизмом.
+#[cfg(not(target_arch = "wasm32"))]
+const SAVE_PATH: &str = "kb.save";
 
 /// Готовый рендер прилетает в событийный цикл как user event: на нативе —
 /// сразу из `resumed`, в браузере — из `spawn_local`, когда адаптер
@@ -60,6 +65,8 @@ struct App {
     keys: Keys,
     grabbed: bool,
     last_frame: Option<Instant>,
+    /// Блок в руке (клавиши 1..3) — весь «инвентарь» до M2-таблиц.
+    selected: Block,
 }
 
 impl App {
@@ -123,6 +130,11 @@ impl ApplicationHandler<GfxReady> for App {
             let s = w.inner_size();
             gfx.resize(s.width, s.height);
         }
+        // Продолжаем сохранённый мир, если он есть.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(bytes) = std::fs::read(SAVE_PATH) {
+            gfx.import_save(&bytes);
+        }
         self.gfx = Some(gfx);
         self.last_frame = Some(Instant::now());
         // На нативе курсор можно брать сразу; в браузере — только по клику.
@@ -144,17 +156,47 @@ impl ApplicationHandler<GfxReady> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // Сейв на выходе: весь мир — это сид и дифф-лог (§4).
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(gfx) = &self.gfx {
+                    std::fs::write(SAVE_PATH, gfx.export_save()).ok();
+                }
+                event_loop.exit();
+            }
             WindowEvent::Resized(s) => {
                 if let Some(gfx) = &mut self.gfx {
                     gfx.resize(s.width, s.height);
                 }
             }
-            WindowEvent::MouseInput { state: ElementState::Pressed, .. } => self.grab(true),
+            WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
+                // Первый клик захватывает мышь, дальше кликаем по миру.
+                if !self.grabbed {
+                    return self.grab(true);
+                }
+                if let Some(gfx) = &mut self.gfx {
+                    match button {
+                        MouseButton::Left => gfx.interact(None),
+                        MouseButton::Right => gfx.interact(Some(self.selected)),
+                        _ => {}
+                    }
+                }
+            }
             WindowEvent::KeyboardInput { event: key, .. } => {
                 if let PhysicalKey::Code(code) = key.physical_key {
-                    if code == KeyCode::Escape {
-                        self.grab(false);
+                    if key.state.is_pressed() {
+                        match code {
+                            KeyCode::Escape => self.grab(false),
+                            KeyCode::KeyF => {
+                                if let Some(gfx) = &mut self.gfx {
+                                    gfx.toggle_fly();
+                                }
+                            }
+                            KeyCode::Digit1 => self.selected = Block::Stone,
+                            KeyCode::Digit2 => self.selected = Block::Dirt,
+                            KeyCode::Digit3 => self.selected = Block::Grass,
+                            _ => {}
+                        }
                     }
                     self.keys.set(code, key.state.is_pressed());
                 }
@@ -172,8 +214,7 @@ impl ApplicationHandler<GfxReady> for App {
                 let dt = (now - *last).as_secs_f32().min(0.1);
                 *last = now;
 
-                let (f, r, u) = self.keys.axes();
-                gfx.camera.fly(f, r, u, dt);
+                gfx.tick(dt, self.keys.axes());
                 gfx.render();
 
                 // Непрерывная анимация: следующий кадр сразу по vsync.
@@ -207,6 +248,7 @@ pub fn run() {
         keys: Keys::default(),
         grabbed: false,
         last_frame: None,
+        selected: Block::Stone,
     };
 
     #[cfg(not(target_arch = "wasm32"))]

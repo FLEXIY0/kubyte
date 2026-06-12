@@ -17,9 +17,6 @@ pub const TEX_BYTES: usize = TEX_SIZE * TEX_SIZE * 4;
 
 /// Дескриптор материала. Это *данные*, а не код (§1): новый материал —
 /// новая константа в таблице, генератор один на всех.
-///
-/// M0 несёт минимум полей; оверлеи, акценты и анимация (§5) доедут в M2,
-/// расширяя эту же структуру.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Descriptor {
     /// Палитра от тёмного к светлому, RGB. Шум выбирает индекс.
@@ -29,32 +26,54 @@ pub struct Descriptor {
     /// Амплитуда вариации яркости, в 1/256 долях. Инвариант грамматики
     /// «блок читается глазом» (§5): не более 38 (≈ ±15%).
     pub variation: u8,
+    /// Оверлей поверх базового шума (§5).
+    pub overlay: Overlay,
+}
+
+/// Оверлеи — те самые «полосы и крапинки» из §5: маленький закрытый
+/// словарь приёмов, из которого собираются все материалы.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overlay {
+    None,
+    /// Рваная полоса сверху (бок травы): глубина кромки пляшет по столбцам.
+    TopBand { palette: [[u8; 3]; 2], min_depth: u8, max_depth: u8 },
+    /// Кластеры-крапинки 2×2 (камешки в земле; этим же приёмом — руды).
+    Speckle { color: [u8; 3], chance: u8 },
 }
 
 pub const STONE: Descriptor = Descriptor {
-    palette: [[88, 88, 92], [108, 108, 112], [125, 125, 129], [144, 144, 148]],
-    cell_log2: 2,
-    variation: 30,
+    // Серый с холодным подтоном, пятна читаются кластерами «в духе эпохи».
+    palette: [[100, 100, 100], [118, 118, 118], [128, 128, 128], [143, 143, 143]],
+    cell_log2: 1,
+    variation: 14,
+    overlay: Overlay::Speckle { color: [88, 88, 88], chance: 36 },
 };
 
 pub const DIRT: Descriptor = Descriptor {
-    palette: [[86, 60, 38], [104, 74, 48], [121, 87, 58], [134, 99, 69]],
+    palette: [[110, 78, 54], [122, 87, 60], [134, 96, 67], [146, 106, 74]],
     cell_log2: 1,
-    variation: 32,
+    variation: 22,
+    overlay: Overlay::Speckle { color: [87, 60, 42], chance: 56 },
 };
 
 pub const GRASS_TOP: Descriptor = Descriptor {
-    palette: [[62, 104, 46], [74, 122, 52], [88, 138, 60], [104, 152, 70]],
+    palette: [[90, 134, 58], [100, 146, 64], [110, 158, 70], [122, 170, 78]],
     cell_log2: 1,
-    variation: 26,
+    variation: 24,
+    overlay: Overlay::Speckle { color: [80, 120, 50], chance: 48 },
 };
 
 pub const GRASS_SIDE: Descriptor = Descriptor {
-    // Земля с зелёным «налётом» сверху по шуму; светлее не бывает —
-    // верх травы обязан читаться светлее боков (§5).
-    palette: [[86, 60, 38], [104, 74, 48], [82, 104, 50], [96, 120, 58]],
+    // Земля с рваной зелёной кромкой сверху — как в бете: травяной слой
+    // «свисает» на бок блока на 2–4 пикселя.
+    palette: DIRT.palette,
     cell_log2: 1,
-    variation: 30,
+    variation: 22,
+    overlay: Overlay::TopBand {
+        palette: [[96, 140, 62], [114, 162, 72]],
+        min_depth: 2,
+        max_depth: 4,
+    },
 };
 
 /// Таблица текстур (§1: данные вместо кода). Индекс = слой texture array.
@@ -118,8 +137,28 @@ pub fn bake(desc: &Descriptor, seed: u64) -> [u8; TEX_BYTES] {
     for y in 0..TEX_SIZE as u32 {
         for x in 0..TEX_SIZE as u32 {
             let structure = value_noise(seed, x, y, desc.cell_log2);
-            let color = desc.palette[(structure as usize * 4) >> 8];
-            // Второй слой — независимый сид (²), знаковое отклонение −v..=+v.
+            let mut color = desc.palette[(structure as usize).clamp(0, 255) * 4 / 256];
+
+            match desc.overlay {
+                Overlay::None => {}
+                // Кластеры 2×2: один бросок на ячейку — крапинка читается
+                // как объект, а не как шум-«песок».
+                Overlay::Speckle { color: c, chance } => {
+                    if hash2(seed ^ 0xC3, (x / 2) as i32, (y / 2) as i32) & 0xFF < chance as u32 {
+                        color = c;
+                    }
+                }
+                // Глубина кромки своя в каждом столбце → рваный край.
+                Overlay::TopBand { palette, min_depth, max_depth } => {
+                    let depth = min_depth as u32
+                        + hash2(seed ^ 0x77, x as i32, 0) % (max_depth - min_depth + 1) as u32;
+                    if y < depth {
+                        color = palette[(hash2(seed ^ 0x77, x as i32, y as i32) & 1) as usize];
+                    }
+                }
+            }
+
+            // Зерно: независимый сид, знаковое отклонение яркости −v..=+v.
             let grain = (hash2(seed ^ 0xA5A5, x as i32, y as i32) & 0xFF) as i32;
             let bright = 256 + ((grain - 128) * desc.variation as i32) / 128;
             let px = &mut out[((y as usize * TEX_SIZE + x as usize) * 4)..][..4];
@@ -148,5 +187,7 @@ mod tests {
 
     /// Зафиксированный хеш эталонной текстуры. Меняется только вместе
     /// с версией генератора (§4).
-    const GOLDEN_STONE_42: u64 = 5781321939385730377;
+    // Обновлён вместе с редизайном текстур «под бету» (мир ещё не имеет
+    // публичных сейвов — менять эталон до альфы законно).
+    const GOLDEN_STONE_42: u64 = 867192019363213887;
 }
