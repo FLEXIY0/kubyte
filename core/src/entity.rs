@@ -45,6 +45,8 @@ pub struct Mob {
     last_attack: f32,
     /// Упёрся в стену на прошлом шаге — пора прыгать.
     blocked: bool,
+    /// Темп хода на последнем шаге (0 — стоит): фаза анимации конечностей.
+    pace: f32,
 }
 
 /// Дистанция, с которой зомби видит игрока.
@@ -65,7 +67,13 @@ impl Mob {
             age: 0.0,
             last_attack: -ATTACK_COOLDOWN,
             blocked: false,
+            pace: 0.0,
         }
+    }
+
+    /// Время жизни и темп — рендеру для качания конечностей.
+    pub fn gait(&self) -> (f32, f32) {
+        (self.age, self.pace)
     }
 
     /// Шаг ИИ + физики. Возвращает урон игроку за этот тик.
@@ -95,6 +103,7 @@ impl Mob {
             )
         };
         self.yaw = dir;
+        self.pace = pace;
 
         let v = self.kind.speed() * pace;
         let wish = [libm::sinf(dir) * v, libm::cosf(dir) * v];

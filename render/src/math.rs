@@ -47,16 +47,54 @@ pub fn view(pos: [f32; 3], yaw: f32, pitch: f32) -> Mat4 {
     ]
 }
 
-/// Матрица части моба: куб [-0.5..0.5]³ → размер `size`, поворот по yaw,
-/// центр на высоте `lift` над ступнями, смещение `fwd` по взгляду.
-pub fn mob_part(pos: [f32; 3], yaw: f32, size: [f32; 3], lift: f32, fwd: f32) -> Mat4 {
-    let (s, c) = yaw.sin_cos();
-    [
-        [c * size[0], 0.0, -s * size[0], 0.0],
-        [0.0, size[1], 0.0, 0.0],
-        [s * size[2], 0.0, c * size[2], 0.0],
-        [pos[0] + s * fwd, pos[1] + lift, pos[2] + c * fwd, 1.0],
-    ]
+fn translate([x, y, z]: [f32; 3]) -> Mat4 {
+    let mut m = IDENT;
+    m[3] = [x, y, z, 1.0];
+    m
+}
+
+fn scale3([x, y, z]: [f32; 3]) -> Mat4 {
+    let mut m = IDENT;
+    (m[0][0], m[1][1], m[2][2]) = (x, y, z);
+    m
+}
+
+fn rot_y(a: f32) -> Mat4 {
+    let (s, c) = a.sin_cos();
+    let mut m = IDENT;
+    (m[0][0], m[0][2], m[2][0], m[2][2]) = (c, -s, s, c);
+    m
+}
+
+fn rot_x(a: f32) -> Mat4 {
+    let (s, c) = a.sin_cos();
+    let mut m = IDENT;
+    (m[1][1], m[1][2], m[2][1], m[2][2]) = (c, s, -s, c);
+    m
+}
+
+const IDENT: Mat4 = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+];
+
+/// Неподвижная часть тела моба: куб [-0.5..0.5]³ → размер `size`,
+/// центр в `center` (локально, над ступнями), разворот по курсу.
+pub fn mob_part(pos: [f32; 3], yaw: f32, size: [f32; 3], center: [f32; 3]) -> Mat4 {
+    mul(
+        &mul(&translate(pos), &rot_y(yaw)),
+        &mul(&translate(center), &scale3(size)),
+    )
+}
+
+/// Конечность: крепится суставом в `joint` (локально, над ступнями),
+/// свисает вниз на свою длину и качается вокруг сустава на `swing` радиан.
+pub fn mob_limb(pos: [f32; 3], yaw: f32, size: [f32; 3], joint: [f32; 3], swing: f32) -> Mat4 {
+    let hang = mul(&translate([0.0, -size[1] / 2.0, 0.0]), &scale3(size));
+    let jointed = mul(&mul(&translate(joint), &rot_x(swing)), &hang);
+    mul(&mul(&translate(pos), &rot_y(yaw)), &jointed)
 }
 
 /// Шесть плоскостей фрустума из матрицы view-projection (метод
@@ -85,4 +123,23 @@ pub fn aabb_visible(planes: &[[f32; 4]; 6], min: [f32; 3], max: [f32; 3]) -> boo
         let v = |i: usize| if p[i] >= 0.0 { max[i] } else { min[i] };
         p[0] * v(0) + p[1] * v(1) + p[2] * v(2) + p[3] >= 0.0
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Конечность без качания — это просто часть, висящая под суставом:
+    /// два пути построения матрицы обязаны сойтись.
+    #[test]
+    fn limb_at_rest_equals_static_part() {
+        let (pos, yaw, size, joint) = ([3.0, 64.0, -2.0], 0.8, [0.25, 0.75, 0.25], [0.125, 0.75, 0.0]);
+        let limb = mob_limb(pos, yaw, size, joint, 0.0);
+        let part = mob_part(pos, yaw, size, [joint[0], joint[1] - size[1] / 2.0, joint[2]]);
+        for c in 0..4 {
+            for r in 0..4 {
+                assert!((limb[c][r] - part[c][r]).abs() < 1e-5, "[{c}][{r}]");
+            }
+        }
+    }
 }

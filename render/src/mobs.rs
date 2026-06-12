@@ -64,26 +64,69 @@ impl Mobs {
         damage
     }
 
-    /// Каждый моб — два куба: тело и голова, повёрнутые по курсу.
+    /// Модели «в духе эпохи» (§7), размеры в блоках (= пиксели модели /16).
+    /// Свинья: голова-куб, лежачее тело, четыре ноги. Зомби: гуманоид
+    /// с вытянутыми вперёд руками. Конечности качаются в темп шага.
     pub fn parts(&self) -> Vec<Part> {
-        self.list
-            .iter()
-            .flat_map(|m| {
-                let p = m.body.pos;
-                let (body, head, layer) = match m.kind {
-                    MobKind::Pig => (
-                        math::mob_part(p, m.yaw, [0.6, 0.55, 0.9], 0.45, 0.0),
-                        math::mob_part(p, m.yaw, [0.45, 0.45, 0.45], 0.75, 0.55),
-                        kb_materials::PIG_LAYER,
-                    ),
-                    MobKind::Zombie => (
-                        math::mob_part(p, m.yaw, [0.55, 1.1, 0.35], 0.75, 0.0),
-                        math::mob_part(p, m.yaw, [0.5, 0.5, 0.5], 1.55, 0.0),
-                        kb_materials::ZOMBIE_LAYER,
-                    ),
-                };
-                [(body, layer), (head, layer)]
-            })
-            .collect()
+        let mut out = Vec::with_capacity(self.list.len() * 6);
+        for m in &self.list {
+            let (p, yaw) = (m.body.pos, m.yaw);
+            let (age, pace) = m.gait();
+            let swing = (age * 8.0).sin() * 0.7 * pace;
+            match m.kind {
+                MobKind::Pig => {
+                    let skin = kb_materials::PIG_LAYER;
+                    // Тело 10×8×16 пикселей, лежит; ноги 4×6×4 по углам.
+                    out.push((math::mob_part(p, yaw, [0.625, 0.5, 1.0], [0.0, 0.625, 0.0]), skin));
+                    out.push((
+                        math::mob_part(p, yaw, [0.5, 0.5, 0.5], [0.0, 0.6875, 0.6875]),
+                        skin,
+                    ));
+                    for (lx, lz) in [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)] {
+                        // Диагональные пары ног шагают в противофазе.
+                        out.push((
+                            math::mob_limb(
+                                p,
+                                yaw,
+                                [0.25, 0.375, 0.25],
+                                [0.1875 * lx, 0.375, 0.3125 * lz],
+                                swing * lx * lz,
+                            ),
+                            skin,
+                        ));
+                    }
+                }
+                MobKind::Zombie => {
+                    let skin = kb_materials::ZOMBIE_LAYER;
+                    // Гуманоид: голова 8³, торс 8×12×4, конечности 4×12×4.
+                    out.push((math::mob_part(p, yaw, [0.5, 0.5, 0.5], [0.0, 1.75, 0.0]), skin));
+                    out.push((math::mob_part(p, yaw, [0.5, 0.75, 0.25], [0.0, 1.125, 0.0]), skin));
+                    for side in [-1.0f32, 1.0] {
+                        // Руки вытянуты вперёд (классика), чуть покачиваются.
+                        out.push((
+                            math::mob_limb(
+                                p,
+                                yaw,
+                                [0.25, 0.75, 0.25],
+                                [0.375 * side, 1.45, 0.0],
+                                -1.5 + swing * 0.15 * side,
+                            ),
+                            skin,
+                        ));
+                        out.push((
+                            math::mob_limb(
+                                p,
+                                yaw,
+                                [0.25, 0.75, 0.25],
+                                [0.125 * side, 0.75, 0.0],
+                                swing * side,
+                            ),
+                            skin,
+                        ));
+                    }
+                }
+            }
+        }
+        out
     }
 }

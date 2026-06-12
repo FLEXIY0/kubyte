@@ -4,11 +4,11 @@
 
 use std::sync::Arc;
 
-use kb_render::{Block, Gfx};
+use kb_render::{Gfx, HOTBAR};
 use web_time::Instant;
 use winit::{
     application::ApplicationHandler,
-    event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent},
+    event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowId},
@@ -65,8 +65,8 @@ struct App {
     keys: Keys,
     grabbed: bool,
     last_frame: Option<Instant>,
-    /// Блок в руке (клавиши 1..3) — весь «инвентарь» до M2-таблиц.
-    selected: Block,
+    /// Слот хотбара (цифры 1–9 и колесо мыши, как в оригинале).
+    selected: usize,
 }
 
 impl App {
@@ -177,8 +177,26 @@ impl ApplicationHandler<GfxReady> for App {
                 if let Some(gfx) = &mut self.gfx {
                     match button {
                         MouseButton::Left => gfx.interact(None),
-                        MouseButton::Right => gfx.interact(Some(self.selected)),
+                        MouseButton::Right => {
+                            if let Some(block) = HOTBAR[self.selected] {
+                                gfx.interact(Some(block));
+                            }
+                        }
                         _ => {}
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // Колесо листает хотбар по кругу, как в оригинале.
+                let step = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => -y as i32,
+                    MouseScrollDelta::PixelDelta(p) => -(p.y as i32).signum(),
+                };
+                if step != 0 {
+                    let n = HOTBAR.len() as i32;
+                    self.selected = ((self.selected as i32 + step).rem_euclid(n)) as usize;
+                    if let Some(gfx) = &mut self.gfx {
+                        gfx.hotbar_sel = self.selected as u32;
                     }
                 }
             }
@@ -192,13 +210,19 @@ impl ApplicationHandler<GfxReady> for App {
                                     gfx.toggle_fly();
                                 }
                             }
-                            KeyCode::Digit1 => self.selected = Block::Stone,
-                            KeyCode::Digit2 => self.selected = Block::Dirt,
-                            KeyCode::Digit3 => self.selected = Block::Grass,
-                            KeyCode::Digit4 => self.selected = Block::Wood,
-                            KeyCode::Digit5 => self.selected = Block::Leaves,
-                            KeyCode::Digit6 => self.selected = Block::Lamp,
+                            KeyCode::Digit1 => self.selected = 0,
+                            KeyCode::Digit2 => self.selected = 1,
+                            KeyCode::Digit3 => self.selected = 2,
+                            KeyCode::Digit4 => self.selected = 3,
+                            KeyCode::Digit5 => self.selected = 4,
+                            KeyCode::Digit6 => self.selected = 5,
+                            KeyCode::Digit7 => self.selected = 6,
+                            KeyCode::Digit8 => self.selected = 7,
+                            KeyCode::Digit9 => self.selected = 8,
                             _ => {}
+                        }
+                        if let Some(gfx) = &mut self.gfx {
+                            gfx.hotbar_sel = self.selected as u32;
                         }
                     }
                     self.keys.set(code, key.state.is_pressed());
@@ -251,7 +275,7 @@ pub fn run() {
         keys: Keys::default(),
         grabbed: false,
         last_frame: None,
-        selected: Block::Stone,
+        selected: 0,
     };
 
     #[cfg(not(target_arch = "wasm32"))]

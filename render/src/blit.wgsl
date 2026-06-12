@@ -1,10 +1,25 @@
-// Ретро-блит (§6): растягивает offscreen-буфер на экран nearest-сэмплером.
-// Дизеринг и квантование цвета доедут сюда же в M4 — это их законное место.
+// Ретро-блит (§6): растягивает offscreen-буфер на экран nearest-сэмплером,
+// квантует цвет с дизерингом и рисует HUD. Раскладка HUD повторяет сетку
+// беты: хотбар 182×22 GUI-px по центру у нижней кромки, сердца 9×9 с шагом
+// 8 над его левым краем; вся пиксельная графика — своя.
 
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
-// HUD: x — здоровье, y — максимум.
+// HUD: x — здоровье, y — максимум, z — выбранный слот хотбара.
 @group(0) @binding(2) var<uniform> hud: vec4<f32>;
+@group(0) @binding(3) var atlas: texture_2d_array<f32>;
+
+// Масштаб GUI: 1 GUI-пиксель = 2 экранных (дефолт эпохи).
+const GUI: f32 = 2.0;
+
+// Слои texture array для слотов хотбара; −1 — пустой слот.
+// ОБЯЗАН совпадать с kb_render::HOTBAR (см. lib.rs).
+const SLOT_LAYERS = array<i32, 9>(0, 1, 3, 4, 5, 6, -1, -1, -1);
+
+// Сердце 9×9: битовая маска строк (старший бит — левый столбец).
+const HEART = array<u32, 9>(
+    0x0D8u, 0x1FCu, 0x1FCu, 0x1FCu, 0x0F8u, 0x070u, 0x020u, 0x000u, 0x000u,
+);
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -25,8 +40,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Дизеринг (§6): квантование до 5 бит/канал с матрицей Байера 4×4.
     // Градиенты неба и ночи рассыпаются в ретро-зерно — носитель
-    // атмосферы §14. Работает в координатах offscreen-пикселей, поэтому
-    // зерно совпадает по масштабу с пикселизацией мира.
+    // атмосферы §14. Зерно в offscreen-пикселях — совпадает по масштабу
+    // с пикселизацией мира.
     let bayer = array<f32, 16>(
          0.0,  8.0,  2.0, 10.0,
         12.0,  4.0, 14.0,  6.0,
@@ -37,24 +52,65 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let threshold = (bayer[(src_px.y % 4u) * 4u + src_px.x % 4u] + 0.5) / 16.0;
     color = floor(color * 31.0 + threshold) / 31.0;
 
-    // Прицел-крестик. Размер экрана восстанавливается из производных uv —
-    // ни юниформа, ни знания разрешения не нужно.
-    let px = abs(in.uv - 0.5) / vec2(dpdx(in.uv.x), dpdy(in.uv.y));
-    if (px.x < 1.0 && px.y < 8.0) || (px.y < 1.0 && px.x < 8.0) {
-        color = 1.0 - color; // инверсия читается на любом фоне
+    // Экран в GUI-пикселях; размер восстановлен из производных uv.
+    let res = 1.0 / vec2(dpdx(in.uv.x), dpdy(in.uv.y));
+    let g = in.uv * res / GUI;
+    let size = res / GUI;
+    let x0 = size.x / 2.0 - 91.0; // левый край хотбара (как в оригинале)
+
+    // Прицел: крестик в центре, инверсия читается на любом фоне.
+    let cx = abs(g - size / 2.0);
+    if (cx.x < 0.6 && cx.y < 5.0) || (cx.y < 0.6 && cx.x < 5.0) {
+        color = 1.0 - color;
     }
 
-    // Сердца: ряд квадратов слева сверху, 2 hp = 1 сердце. UI пока живёт
-    // в блите; нативное разрешение UI (§6) появится вместе с текстом.
-    let scr = in.uv / vec2(dpdx(in.uv.x), dpdy(in.uv.y)); // экранные пиксели
-    let slot = floor((scr.x - 14.0) / 22.0);
-    let inner = vec2(fract((scr.x - 14.0) / 22.0) * 22.0, scr.y - 14.0);
-    if slot >= 0.0 && slot < hud.y / 2.0 && all(inner >= vec2(0.0)) && all(inner < vec2(16.0, 16.0)) {
-        if slot < ceil(hud.x / 2.0) {
-            color = vec3(0.78, 0.12, 0.14); // полное сердце
-        } else {
-            color = vec3(0.16, 0.05, 0.06); // потерянное
+    // --- Хотбар: фон 182×22 у нижней кромки -----------------------------
+    let hb = vec2(g.x - x0, g.y - (size.y - 22.0));
+    if all(hb >= vec2(0.0)) && all(hb < vec2(182.0, 22.0)) {
+        // Рамка и полупрозрачная подложка.
+        color = mix(color, vec3(0.05), 0.78);
+        if hb.x < 1.0 || hb.x >= 181.0 || hb.y < 1.0 || hb.y >= 21.0 {
+            color = vec3(0.22);
+        }
+        // Иконка блока: слот 20 GUI-px, икона 16×16 внутри.
+        let slot = i32(floor((hb.x - 1.0) / 20.0));
+        let local = vec2(hb.x - 1.0 - f32(slot) * 20.0, hb.y) - vec2(2.0, 3.0);
+        if slot >= 0 && slot < 9 && all(local >= vec2(0.0)) && all(local < vec2(16.0)) {
+            let layer = SLOT_LAYERS[slot];
+            if layer >= 0 {
+                let texel = textureSampleLevel(atlas, samp, (local + 0.5) / 16.0, u32(layer), 0.0);
+                color = mix(color, texel.rgb, 1.0);
+            }
         }
     }
+    // Подсветка выбранного слота: рамка 24×24 вокруг ячейки (как в бете).
+    let sel = hud.z;
+    let sb = vec2(g.x - (x0 - 1.0 + sel * 20.0), g.y - (size.y - 23.0));
+    if all(sb >= vec2(0.0)) && all(sb < vec2(24.0, 23.0)) {
+        let edge = sb.x < 1.0 || sb.x >= 23.0 || sb.y < 1.0 || sb.y >= 22.0;
+        if edge {
+            color = vec3(0.92);
+        }
+    }
+
+    // --- Сердца: над левым краем хотбара, y = низ − 32 -------------------
+    let hy = g.y - (size.y - 32.0);
+    if hy >= 0.0 && hy < 9.0 {
+        let hi = floor((g.x - x0) / 8.0); // шаг 8 — сердца внахлёст
+        let hx = g.x - x0 - hi * 8.0;
+        if hi >= 0.0 && hi < 10.0 && hx >= 0.0 && hx < 9.0 {
+            let bit = (HEART[u32(hy)] >> (8u - u32(hx))) & 1u;
+            if bit == 1u {
+                let full = hi * 2.0 + 2.0 <= hud.x;
+                let half = !full && hi * 2.0 + 1.0 <= hud.x && hx < 4.0;
+                if full || half {
+                    color = vec3(0.80, 0.11, 0.13);
+                } else {
+                    color = vec3(0.15, 0.04, 0.05); // пустая ячейка
+                }
+            }
+        }
+    }
+
     return vec4(color, 1.0);
 }

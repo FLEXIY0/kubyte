@@ -16,6 +16,20 @@ use wgpu::util::DeviceExt;
 /// Платформе нужен словарь блоков (выбор в хотбаре) без зависимости от ядра.
 pub use kb_core::Block;
 
+/// Хотбар: 9 слотов как в бете, занято 6. Иконки рисует blit-шейдер —
+/// его таблица слоёв обязана совпадать с этой (см. SLOT_LAYERS в blit.wgsl).
+pub const HOTBAR: [Option<Block>; 9] = [
+    Some(Block::Stone),
+    Some(Block::Dirt),
+    Some(Block::Grass),
+    Some(Block::Wood),
+    Some(Block::Leaves),
+    Some(Block::Lamp),
+    None,
+    None,
+    None,
+];
+
 /// Во сколько раз offscreen-буфер меньше экрана. Целое — пиксели обязаны
 /// быть одинаковой ширины (integer scaling, §6). Станет настройкой в M4.
 const PIXEL_SCALE: u32 = 3;
@@ -32,8 +46,8 @@ const FOG_END: f32 = (world::VIEW_RADIUS * 16) as f32;
 
 /// Максимум чанков в кадре: полный квадрат видимости с запасом.
 const MAX_DRAWS: usize = 512;
-/// Максимум частей мобов в кадре (12 мобов × 2 куба — с запасом).
-const MAX_PARTS: usize = 64;
+/// Максимум частей мобов в кадре (12 мобов × 6 кубов — с запасом).
+const MAX_PARTS: usize = 128;
 /// Здоровье игрока, как в бете: 20 = 10 сердец.
 const MAX_HP: i8 = 20;
 /// Падение быстрее этой скорости отнимает здоровье.
@@ -143,6 +157,7 @@ impl Offscreen {
         blit_layout: &wgpu::BindGroupLayout,
         sampler: &wgpu::Sampler,
         hud: &wgpu::Buffer,
+        atlas: &wgpu::TextureView,
     ) -> Self {
         let size = wgpu::Extent3d {
             width: (surface_size.0 / PIXEL_SCALE).max(1),
@@ -189,6 +204,10 @@ impl Offscreen {
                     binding: 2,
                     resource: hud.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(atlas),
+                },
             ],
         });
         Self { color, depth, blit_bind }
@@ -216,11 +235,14 @@ pub struct Gfx {
     cube_vb: wgpu::Buffer,
     cube_ib: wgpu::Buffer,
     hud_buf: wgpu::Buffer,
+    atlas: wgpu::TextureView,
     world: world::World,
     player: kb_core::Player,
     mobs: mobs::Mobs,
     /// Здоровье 0..=20; смерть — респавн на точке старта.
     pub hp: i8,
+    /// Выбранный слот хотбара (для подсветки в HUD).
+    pub hotbar_sel: u32,
     spawn: [f32; 3],
     pub mode: Mode,
     pub camera: Camera,
@@ -288,6 +310,7 @@ impl Gfx {
             &pixels,
         );
         let nearest = device.create_sampler(&wgpu::SamplerDescriptor::default());
+        let atlas = texture.create_view(&Default::default());
 
         // --- Юниформы: камера + смещения чанков (динамический оффсет) ----
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -348,9 +371,7 @@ impl Gfx {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(
-                        &texture.create_view(&Default::default()),
-                    ),
+                    resource: wgpu::BindingResource::TextureView(&atlas),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -507,6 +528,17 @@ impl Gfx {
                 },
                 sampler_entry(1),
                 uniform_entry(2, wgpu::ShaderStages::FRAGMENT, false),
+                // Атлас материалов — иконки хотбара.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -535,7 +567,7 @@ impl Gfx {
             cache: None,
         });
 
-        let offscreen = Offscreen::new(&device, size, &blit_layout, &nearest, &hud_buf);
+        let offscreen = Offscreen::new(&device, size, &blit_layout, &nearest, &hud_buf, &atlas);
 
         // Спавн — на поверхности в начале координат.
         let spawn = [8.5, kb_worldgen::height(SEED, 8, 8) as f32 + 1.0, 8.5];
@@ -566,10 +598,12 @@ impl Gfx {
             cube_vb,
             cube_ib,
             hud_buf,
+            atlas,
             world: world::World::new(SEED),
             player: kb_core::Player::new(spawn),
             mobs: mobs::Mobs::new(),
             hp: MAX_HP,
+            hotbar_sel: 0,
             spawn,
             mode: Mode::Walk,
             camera,
@@ -696,6 +730,7 @@ impl Gfx {
             &self.blit_layout,
             &self.nearest,
             &self.hud_buf,
+            &self.atlas,
         );
     }
 
@@ -744,11 +779,16 @@ impl Gfx {
             self.queue.write_buffer(&self.parts_buf, 0, &parts_data);
         }
 
-        // HUD: здоровье для полоски сердец в блите.
+        // HUD: здоровье и выбранный слот для блита.
         self.queue.write_buffer(
             &self.hud_buf,
             0,
-            bytemuck::cast_slice(&[self.hp as f32, MAX_HP as f32, 0.0, 0.0]),
+            bytemuck::cast_slice(&[
+                self.hp as f32,
+                MAX_HP as f32,
+                self.hotbar_sel as f32,
+                0.0,
+            ]),
         );
 
         use wgpu::CurrentSurfaceTexture as Cst;
