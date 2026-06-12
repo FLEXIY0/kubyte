@@ -710,6 +710,9 @@ dependencies = [
 [[package]]
 name = "kb-core"
 version = "0.0.1"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "kb-materials"

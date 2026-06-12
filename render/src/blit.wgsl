@@ -3,6 +3,8 @@
 
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
+// HUD: x — здоровье, y — максимум.
+@group(0) @binding(2) var<uniform> hud: vec4<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -40,6 +42,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let px = abs(in.uv - 0.5) / vec2(dpdx(in.uv.x), dpdy(in.uv.y));
     if (px.x < 1.0 && px.y < 8.0) || (px.y < 1.0 && px.x < 8.0) {
         color = 1.0 - color; // инверсия читается на любом фоне
+    }
+
+    // Сердца: ряд квадратов слева сверху, 2 hp = 1 сердце. UI пока живёт
+    // в блите; нативное разрешение UI (§6) появится вместе с текстом.
+    let scr = in.uv / vec2(dpdx(in.uv.x), dpdy(in.uv.y)); // экранные пиксели
+    let slot = floor((scr.x - 14.0) / 22.0);
+    let inner = vec2(fract((scr.x - 14.0) / 22.0) * 22.0, scr.y - 14.0);
+    if slot >= 0.0 && slot < hud.y / 2.0 && all(inner >= vec2(0.0)) && all(inner < vec2(16.0, 16.0)) {
+        if slot < ceil(hud.x / 2.0) {
+            color = vec3(0.78, 0.12, 0.14); // полное сердце
+        } else {
+            color = vec3(0.16, 0.05, 0.06); // потерянное
+        }
     }
     return vec4(color, 1.0);
 }

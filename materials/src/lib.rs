@@ -101,10 +101,31 @@ pub const LAMP: Descriptor = Descriptor {
     overlay: Overlay::Speckle { color: [255, 222, 150], chance: 70 },
 };
 
+/// «Кожа» мобов — те же дескрипторы, что у блоков (§1: один генератор
+/// на всё). Дизайн — свой, «в духе эпохи» (§7), без копирования Mojang.
+pub const PIG: Descriptor = Descriptor {
+    palette: [[196, 124, 124], [212, 140, 138], [226, 154, 150], [238, 170, 164]],
+    cell_log2: 2,
+    variation: 16,
+    overlay: Overlay::Speckle { color: [178, 108, 110], chance: 24 },
+};
+
+pub const ZOMBIE: Descriptor = Descriptor {
+    // Болотная гниль: холодная и тусклая — силуэт мрачнее любого блока.
+    palette: [[58, 84, 58], [66, 96, 64], [76, 108, 72], [86, 118, 80]],
+    cell_log2: 1,
+    variation: 30,
+    overlay: Overlay::Speckle { color: [44, 62, 46], chance: 60 },
+};
+
 /// Таблица текстур (§1: данные вместо кода). Индекс = слой texture array.
 /// Порядок зафиксирован: на него ссылается FACE_LAYERS.
 pub const TEXTURES: &[Descriptor] =
-    &[STONE, DIRT, GRASS_TOP, GRASS_SIDE, WOOD, LEAVES, LAMP];
+    &[STONE, DIRT, GRASS_TOP, GRASS_SIDE, WOOD, LEAVES, LAMP, PIG, ZOMBIE];
+
+/// Слои «кожи» мобов в texture array.
+pub const PIG_LAYER: u32 = 7;
+pub const ZOMBIE_LAYER: u32 = 8;
 
 /// Слой текстуры для каждой грани блока: [материал][грань],
 /// грани в порядке нормалей рендера: +X −X +Y −Y +Z −Z.

@@ -8,6 +8,7 @@
 mod light;
 mod math;
 mod mesh;
+mod mobs;
 mod world;
 
 use wgpu::util::DeviceExt;
@@ -31,6 +32,12 @@ const FOG_END: f32 = (world::VIEW_RADIUS * 16) as f32;
 
 /// Максимум чанков в кадре: полный квадрат видимости с запасом.
 const MAX_DRAWS: usize = 512;
+/// Максимум частей мобов в кадре (12 мобов × 2 куба — с запасом).
+const MAX_PARTS: usize = 64;
+/// Здоровье игрока, как в бете: 20 = 10 сердец.
+const MAX_HP: i8 = 20;
+/// Падение быстрее этой скорости отнимает здоровье.
+const SAFE_FALL_SPEED: f32 = 16.0;
 /// Максимум квадов в одном чанк-меше, на который рассчитан общий
 /// индексный буфер (1.5 МиБ GPU). Реальный рельеф даёт порядки меньше.
 const MAX_QUADS: usize = 65536;
@@ -135,6 +142,7 @@ impl Offscreen {
         surface_size: (u32, u32),
         blit_layout: &wgpu::BindGroupLayout,
         sampler: &wgpu::Sampler,
+        hud: &wgpu::Buffer,
     ) -> Self {
         let size = wgpu::Extent3d {
             width: (surface_size.0 / PIXEL_SCALE).max(1),
@@ -177,6 +185,10 @@ impl Offscreen {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: hud.as_entire_binding(),
+                },
             ],
         });
         Self { color, depth, blit_bind }
@@ -198,8 +210,18 @@ pub struct Gfx {
     camera_buf: wgpu::Buffer,
     origins_buf: wgpu::Buffer,
     quad_indices: wgpu::Buffer,
+    entity_pipeline: wgpu::RenderPipeline,
+    parts_bind: wgpu::BindGroup,
+    parts_buf: wgpu::Buffer,
+    cube_vb: wgpu::Buffer,
+    cube_ib: wgpu::Buffer,
+    hud_buf: wgpu::Buffer,
     world: world::World,
     player: kb_core::Player,
+    mobs: mobs::Mobs,
+    /// Здоровье 0..=20; смерть — респавн на точке старта.
+    pub hp: i8,
+    spawn: [f32; 3],
     pub mode: Mode,
     pub camera: Camera,
     /// Игровое время суток, секунд. Стартуем утром.
@@ -388,7 +410,87 @@ impl Gfx {
             cache: None,
         });
 
+        // --- Мобы: кубы с модельными матрицами ---------------------------
+        let parts_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("parts.layout"),
+            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT, true)],
+        });
+        let parts_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mob.parts"),
+            size: (MAX_PARTS * UB_ALIGN) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let parts_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("parts.bind"),
+            layout: &parts_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &parts_buf,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(80), // mat4 + vec4
+                }),
+            }],
+        });
+        let (cube_verts, cube_idx) = cube_mesh();
+        let cube_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("cube.vb"),
+            contents: bytemuck::cast_slice(&cube_verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let cube_ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("cube.ib"),
+            contents: bytemuck::cast_slice(&cube_idx),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let entity_shader = device.create_shader_module(wgpu::include_wgsl!("entity.wgsl"));
+        let entity_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("entity.pipeline"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[Some(&scene_layout), Some(&parts_layout)],
+                immediate_size: 0,
+            })),
+            vertex: wgpu::VertexState {
+                module: &entity_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 32, // pos3 + normal3 + uv2, f32
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &entity_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(OFFSCREEN_FORMAT.into())],
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         // --- Блит: offscreen → экран -------------------------------------
+        let hud_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hud"),
+            size: 16, // vec4: hp, max_hp, 0, 0
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let blit_shader = device.create_shader_module(wgpu::include_wgsl!("blit.wgsl"));
         let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("blit.layout"),
@@ -404,6 +506,7 @@ impl Gfx {
                     count: None,
                 },
                 sampler_entry(1),
+                uniform_entry(2, wgpu::ShaderStages::FRAGMENT, false),
             ],
         });
         let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -432,7 +535,7 @@ impl Gfx {
             cache: None,
         });
 
-        let offscreen = Offscreen::new(&device, size, &blit_layout, &nearest);
+        let offscreen = Offscreen::new(&device, size, &blit_layout, &nearest, &hud_buf);
 
         // Спавн — на поверхности в начале координат.
         let spawn = [8.5, kb_worldgen::height(SEED, 8, 8) as f32 + 1.0, 8.5];
@@ -457,8 +560,17 @@ impl Gfx {
             camera_buf,
             origins_buf,
             quad_indices,
+            entity_pipeline,
+            parts_bind,
+            parts_buf,
+            cube_vb,
+            cube_ib,
+            hud_buf,
             world: world::World::new(SEED),
             player: kb_core::Player::new(spawn),
+            mobs: mobs::Mobs::new(),
+            hp: MAX_HP,
+            spawn,
             mode: Mode::Walk,
             camera,
             // Утро; KB_TIME=<сек> — отладочная перемотка суток (native).
@@ -476,6 +588,13 @@ impl Gfx {
     /// в Fly — носклип-камера. Камера в Walk прибита к глазам игрока.
     pub fn tick(&mut self, dt: f32, (forward, right, up): (f32, f32, f32)) {
         self.time = (self.time + dt) % DAY_SECONDS;
+
+        // Мобы живут в обоих режимах; урон игроку — только пешему.
+        let night = daylight(self.time).0[3] < 0.4;
+        let mob_damage =
+            self.mobs
+                .tick(dt, self.player.pos, night, &mut self.world);
+
         if self.mode == Mode::Fly {
             return self.camera.fly(forward, right, up, dt);
         }
@@ -484,9 +603,23 @@ impl Gfx {
             (-s * forward + c * right) * WALK_SPEED,
             (-c * forward - s * right) * WALK_SPEED,
         ];
+        let falling = self.player.vel[1];
         let world = &mut self.world;
         self.player
             .step(dt, wish, up > 0.0, |x, y, z| world.block([x, y, z]).solid());
+
+        // Урон: укусы + жёсткое приземление (скорость на момент касания).
+        let mut damage = mob_damage;
+        if self.player.on_ground && falling < -SAFE_FALL_SPEED {
+            damage = damage.saturating_add(((-falling - SAFE_FALL_SPEED) * 0.6) as i8 + 1);
+        }
+        self.hp = (self.hp - damage).max(0);
+        if self.hp == 0 {
+            // Смерть в духе беты: мгновенный респавн на точке старта.
+            self.player = kb_core::Player::new(self.spawn);
+            self.hp = MAX_HP;
+        }
+
         self.camera.pos = self.player.pos;
         self.camera.pos[1] += kb_core::EYE_HEIGHT;
     }
@@ -557,8 +690,13 @@ impl Gfx {
         }
         (self.config.width, self.config.height) = (width, height);
         self.surface.configure(&self.device, &self.config);
-        self.offscreen =
-            Offscreen::new(&self.device, (width, height), &self.blit_layout, &self.nearest);
+        self.offscreen = Offscreen::new(
+            &self.device,
+            (width, height),
+            &self.blit_layout,
+            &self.nearest,
+            &self.hud_buf,
+        );
     }
 
     /// Кадр: стриминг чанков → сцена в offscreen → nearest-блит на экран.
@@ -593,6 +731,25 @@ impl Gfx {
         if !origins.is_empty() {
             self.queue.write_buffer(&self.origins_buf, 0, &origins);
         }
+
+        // Части мобов: mat4 + слой кожи на слот.
+        let parts = self.mobs.parts();
+        let mut parts_data = vec![0u8; parts.len().min(MAX_PARTS) * UB_ALIGN];
+        for (i, (model, layer)) in parts.iter().take(MAX_PARTS).enumerate() {
+            let slot = &mut parts_data[i * UB_ALIGN..];
+            slot[..64].copy_from_slice(bytemuck::cast_slice(model));
+            slot[64..80].copy_from_slice(bytemuck::cast_slice(&[*layer as f32, 0.0, 0.0, 0.0]));
+        }
+        if !parts_data.is_empty() {
+            self.queue.write_buffer(&self.parts_buf, 0, &parts_data);
+        }
+
+        // HUD: здоровье для полоски сердец в блите.
+        self.queue.write_buffer(
+            &self.hud_buf,
+            0,
+            bytemuck::cast_slice(&[self.hp as f32, MAX_HP as f32, 0.0, 0.0]),
+        );
 
         use wgpu::CurrentSurfaceTexture as Cst;
         let frame = match self.surface.get_current_texture() {
@@ -645,6 +802,15 @@ impl Gfx {
                 pass.set_vertex_buffer(0, d.vertices.slice(..));
                 pass.draw_indexed(0..d.quads.min(MAX_QUADS as u32) * 6, 0, 0..1);
             }
+
+            // Мобы — тем же пассом, через общий offscreen (§6: один буфер).
+            pass.set_pipeline(&self.entity_pipeline);
+            pass.set_vertex_buffer(0, self.cube_vb.slice(..));
+            pass.set_index_buffer(self.cube_ib.slice(..), wgpu::IndexFormat::Uint16);
+            for i in 0..parts.len().min(MAX_PARTS) {
+                pass.set_bind_group(1, &self.parts_bind, &[(i * UB_ALIGN) as u32]);
+                pass.draw_indexed(0..36, 0, 0..1);
+            }
         }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -685,6 +851,47 @@ fn uniform_entry(
         },
         count: None,
     }
+}
+
+/// Вершина куба сущностей: позиция/нормаль/uv во float — мобам нужна
+/// плавная позиция, упаковка чанков им не подходит.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct EVertex {
+    pos: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+}
+
+/// Куб 1×1×1 вокруг начала координат: 6 граней из таблицы нормалей —
+/// данные вместо шести скопированных кусков кода (§1).
+fn cube_mesh() -> ([EVertex; 24], [u16; 36]) {
+    const N: [[f32; 3]; 6] = [
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
+    ];
+    let mut verts = [EVertex { pos: [0.0; 3], normal: [0.0; 3], uv: [0.0; 2] }; 24];
+    let mut idx = [0u16; 36];
+    for (f, n) in N.iter().enumerate() {
+        // Базис грани: u = ось, циклически следующая за нормалью, v = n × u.
+        let a = n.iter().position(|&c| c != 0.0).unwrap();
+        let (u, v) = ((a + 1) % 3, (a + 2) % 3);
+        for corner in 0..4 {
+            let (su, sv) = ((corner & 1) as f32 - 0.5, (corner >> 1) as f32 - 0.5);
+            let mut pos = [0.0f32; 3];
+            pos[a] = n[a] * 0.5;
+            pos[u] = su * n[a]; // знак держит обход CCW наружу для обеих сторон
+            pos[v] = sv;
+            verts[f * 4 + corner] = EVertex { pos, normal: *n, uv: [su + 0.5, 0.5 - sv] };
+        }
+        let base = (f * 4) as u16;
+        idx[f * 6..f * 6 + 6].copy_from_slice(&[0, 1, 2, 2, 1, 3].map(|i| base + i));
+    }
+    (verts, idx)
 }
 
 fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {

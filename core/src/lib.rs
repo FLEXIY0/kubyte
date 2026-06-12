@@ -11,9 +11,11 @@
 extern crate alloc;
 
 mod chunk;
+mod entity;
 mod physics;
 mod raycast;
 pub use chunk::{Block, Chunk, CHUNK_X, CHUNK_Y, CHUNK_Z, CHUNK_VOLUME};
+pub use entity::{Mob, MobKind};
 pub use physics::{Player, EYE_HEIGHT, PLAYER_HEIGHT, PLAYER_WIDTH};
 pub use raycast::raycast;
 
