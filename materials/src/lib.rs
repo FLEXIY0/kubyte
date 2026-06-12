@@ -54,36 +54,38 @@ pub enum Overlay {
     Stripes { color: [u8; 3], period: u8 },
 }
 
+// Палитры — «настроение альфы»: трава ярче и сочнее, земля теплее и
+// рыжее, камень светлый и ровный. Сами пиксели — наш генератор.
+
 pub const STONE: Descriptor = Descriptor {
-    // Серый с холодным подтоном, пятна читаются кластерами «в духе эпохи».
-    palette: [[100, 100, 100], [118, 118, 118], [128, 128, 128], [143, 143, 143]],
+    palette: [[106, 106, 106], [122, 122, 122], [132, 132, 132], [148, 148, 148]],
     cell_log2: 1,
-    variation: 14,
-    overlay: Overlay::Speckle { color: [88, 88, 88], chance: 36 },
+    variation: 13,
+    overlay: Overlay::Speckle { color: [94, 94, 94], chance: 34 },
 };
 
 pub const DIRT: Descriptor = Descriptor {
-    palette: [[110, 78, 54], [122, 87, 60], [134, 96, 67], [146, 106, 74]],
+    palette: [[121, 85, 58], [134, 96, 65], [146, 107, 72], [158, 118, 80]],
     cell_log2: 1,
     variation: 22,
-    overlay: Overlay::Speckle { color: [87, 60, 42], chance: 56 },
+    overlay: Overlay::Speckle { color: [96, 66, 44], chance: 58 },
 };
 
 pub const GRASS_TOP: Descriptor = Descriptor {
-    palette: [[90, 134, 58], [100, 146, 64], [110, 158, 70], [122, 170, 78]],
+    palette: [[97, 153, 56], [108, 167, 62], [120, 180, 69], [133, 193, 78]],
     cell_log2: 1,
-    variation: 24,
-    overlay: Overlay::Speckle { color: [80, 120, 50], chance: 48 },
+    variation: 23,
+    overlay: Overlay::Speckle { color: [86, 138, 50], chance: 46 },
 };
 
 pub const GRASS_SIDE: Descriptor = Descriptor {
-    // Земля с рваной зелёной кромкой сверху — как в бете: травяной слой
-    // «свисает» на бок блока на 2–4 пикселя.
+    // Земля с рваной зелёной кромкой сверху: травяной слой «свисает»
+    // на бок блока на 2–4 пикселя.
     palette: DIRT.palette,
     cell_log2: 1,
     variation: 22,
     overlay: Overlay::TopBand {
-        palette: [[96, 140, 62], [114, 162, 72]],
+        palette: [[104, 161, 58], [121, 181, 68]],
         min_depth: 2,
         max_depth: 4,
     },
@@ -258,6 +260,7 @@ mod tests {
 
     /// Зафиксированный хеш эталонной текстуры. Меняется только вместе
     /// с версией генератора (§4).
-    // Обновлён вместе с тоном вариантов (§5). Менять эталон до альфы законно.
-    const GOLDEN_STONE_42: u64 = 13623330163264351272;
+    // Обновлён вместе с палитрами «настроение альфы». До альфы-релиза
+    // менять эталон законно.
+    const GOLDEN_STONE_42: u64 = 4399156644410169279;
 }
