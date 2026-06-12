@@ -66,34 +66,40 @@ const REACH: f32 = 5.0;
 /// Полный цикл суток, секунд (10 минут — как в эпоху беты).
 const DAY_SECONDS: f32 = 600.0;
 
-/// Цвета времени суток (§6, §14): день — нейтрально-тёплый свет и
-/// приглушённое небо; ночь — холодный лунный свет, мир выцветает,
-/// ночи темнее ванильных. Всё остальное — интерполяция.
+/// Три фазы суток (§6, §14): яркий насыщенный день «как в классике»,
+/// тёплая персиковая заря на восходе и закате, тёмная холодная ночь —
+/// мир выцветает, ночи темнее ванильных.
 const SUN_DAY: [f32; 4] = [1.0, 0.97, 0.90, 1.0];
 const SUN_NIGHT: [f32; 4] = [0.45, 0.55, 0.85, 0.16];
-const SKY_DAY: [f32; 3] = [0.35, 0.52, 0.74];
+const SUN_DAWN: [f32; 4] = [1.0, 0.70, 0.42, 0.62];
+const SKY_DAY: [f32; 3] = [0.43, 0.65, 0.92];
 const SKY_NIGHT: [f32; 3] = [0.010, 0.014, 0.032];
+const SKY_DAWN: [f32; 3] = [0.86, 0.54, 0.36];
 
 /// Положение солнца → факторы дня. Возвращает (sun rgba, sky rgb):
-/// плавные сумерки через smoothstep по синусу суточной фазы.
+/// ночь↔день через smoothstep по синусу фазы, поверх — колокол зари,
+/// подкрашивающий оба перехода тёплым.
 fn daylight(time: f32) -> ([f32; 4], [f32; 3]) {
-    let phase = (time / DAY_SECONDS) * core::f32::consts::TAU;
-    // 1 в полдень, 0 в полночь, рассвет/закат — узкая полоса у горизонта.
-    let s = phase.sin();
+    let s = ((time / DAY_SECONDS) * core::f32::consts::TAU).sin();
     let t = ((s + 0.15) / 0.4).clamp(0.0, 1.0);
     let t = t * t * (3.0 - 2.0 * t);
-    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    // Заря: максимум у горизонта (s≈0), быстро гаснет в обе стороны.
+    let dawn = (1.0 - (s / 0.30).abs()).clamp(0.0, 1.0) * 0.8;
+    let mix3 = |n: &[f32], d: &[f32], w: &[f32], i: usize| {
+        let base = n[i] + (d[i] - n[i]) * t;
+        base + (w[i] - base) * dawn
+    };
     (
         [
-            lerp(SUN_NIGHT[0], SUN_DAY[0]),
-            lerp(SUN_NIGHT[1], SUN_DAY[1]),
-            lerp(SUN_NIGHT[2], SUN_DAY[2]),
-            lerp(SUN_NIGHT[3], SUN_DAY[3]),
+            mix3(&SUN_NIGHT, &SUN_DAY, &SUN_DAWN, 0),
+            mix3(&SUN_NIGHT, &SUN_DAY, &SUN_DAWN, 1),
+            mix3(&SUN_NIGHT, &SUN_DAY, &SUN_DAWN, 2),
+            mix3(&SUN_NIGHT, &SUN_DAY, &SUN_DAWN, 3),
         ],
         [
-            lerp(SKY_NIGHT[0], SKY_DAY[0]),
-            lerp(SKY_NIGHT[1], SKY_DAY[1]),
-            lerp(SKY_NIGHT[2], SKY_DAY[2]),
+            mix3(&SKY_NIGHT, &SKY_DAY, &SKY_DAWN, 0),
+            mix3(&SKY_NIGHT, &SKY_DAY, &SKY_DAWN, 1),
+            mix3(&SKY_NIGHT, &SKY_DAY, &SKY_DAWN, 2),
         ],
     )
 }
@@ -229,6 +235,7 @@ pub struct Gfx {
     camera_buf: wgpu::Buffer,
     origins_buf: wgpu::Buffer,
     quad_indices: wgpu::Buffer,
+    cloud_pipeline: wgpu::RenderPipeline,
     entity_pipeline: wgpu::RenderPipeline,
     parts_bind: wgpu::BindGroup,
     parts_buf: wgpu::Buffer,
@@ -436,6 +443,45 @@ impl Gfx {
             cache: None,
         });
 
+        // --- Облака: квад вокруг камеры, форма — в пикселе ---------------
+        let cloud_shader = device.create_shader_module(wgpu::include_wgsl!("clouds.wgsl"));
+        let cloud_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("clouds.pipeline"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[Some(&scene_layout)],
+                immediate_size: 0,
+            })),
+            vertex: wgpu::VertexState {
+                module: &cloud_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &cloud_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: OFFSCREEN_FORMAT,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            // Слой виден и снизу, и сверху — полёт выше облаков легален.
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false), // полупрозрачные: тест есть, записи нет
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         // --- Мобы: кубы с модельными матрицами ---------------------------
         let parts_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("parts.layout"),
@@ -597,6 +643,7 @@ impl Gfx {
             camera_buf,
             origins_buf,
             quad_indices,
+            cloud_pipeline,
             entity_pipeline,
             parts_bind,
             parts_buf,
@@ -755,6 +802,7 @@ impl Gfx {
         camera_data[19] = FOG_END;
         camera_data[20..24].copy_from_slice(&sun);
         camera_data[24..27].copy_from_slice(&sky);
+        camera_data[27] = self.time; // ветер облаков
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&camera_data));
 
@@ -856,6 +904,11 @@ impl Gfx {
                 pass.set_bind_group(1, &self.parts_bind, &[(i * UB_ALIGN) as u32]);
                 pass.draw_indexed(0..36, 0, 0..1);
             }
+
+            // Облака — последними: полупрозрачные поверх всего непрозрачного.
+            pass.set_pipeline(&self.cloud_pipeline);
+            pass.set_bind_group(0, &self.scene_bind, &[]);
+            pass.draw(0..6, 0..1);
         }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
