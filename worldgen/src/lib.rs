@@ -47,20 +47,70 @@ pub fn height(seed: u64, wx: i32, wz: i32) -> i32 {
     (BASE_HEIGHT + ((fbm * 40) >> 10)).clamp(1, CHUNK_Y as i32 - 1)
 }
 
+/// Радиус кроны: дерево «дотягивается» в чанк из соседних столбцов.
+const CROWN: i32 = 2;
+/// Шанс дерева на столбец, из 256.
+const TREE_CHANCE: u32 = 3;
+
+/// Дерево в столбце (wx, wz)? Чистая функция мировых координат —
+/// деревья бесшовны через границы чанков так же, как рельеф.
+fn tree_at(seed: u64, wx: i32, wz: i32) -> Option<(i32, i32)> {
+    let roll = hash2(splitmix64(seed ^ 0xDEED), wx, wz);
+    (roll & 0xFF < TREE_CHANCE).then(|| {
+        let ground = height(seed, wx, wz);
+        (ground, 4 + (roll >> 8 & 1) as i32) // высота ствола 4–5
+    })
+}
+
 /// Генерация чанка (cx, cz). Бюджет §9: < 1 мс.
 pub fn generate(seed: u64, cx: i32, cz: i32) -> Chunk {
+    let (ox, oz) = (cx * CHUNK_X as i32, cz * CHUNK_Z as i32);
+
     // Карта высот считается один раз на столбец, не на блок.
     let mut heights = [0i32; CHUNK_X * CHUNK_Z];
     for z in 0..CHUNK_Z {
         for x in 0..CHUNK_X {
-            heights[x + z * CHUNK_X] = height(
-                seed,
-                cx * CHUNK_X as i32 + x as i32,
-                cz * CHUNK_Z as i32 + z as i32,
-            );
+            heights[x + z * CHUNK_X] = height(seed, ox + x as i32, oz + z as i32);
         }
     }
+
+    // Деревья, чьи кроны достают до чанка: ствол + крона рисуются в
+    // буфер поверх рельефа — чанк остаётся чистой функцией координат.
+    let mut flora = [Block::Air; CHUNK_X * CHUNK_Y * CHUNK_Z];
+    let mut put = |x: i32, y: i32, z: i32, b: Block| {
+        if (0..CHUNK_X as i32).contains(&x)
+            && (0..CHUNK_Y as i32).contains(&y)
+            && (0..CHUNK_Z as i32).contains(&z)
+        {
+            flora[x as usize + z as usize * CHUNK_X + y as usize * CHUNK_X * CHUNK_Z] = b;
+        }
+    };
+    for tz in -CROWN..CHUNK_Z as i32 + CROWN {
+        for tx in -CROWN..CHUNK_X as i32 + CROWN {
+            let Some((ground, trunk)) = tree_at(seed, ox + tx, oz + tz) else { continue };
+            let top = ground + trunk;
+            // Крона: два слоя 5×5 под макушкой, слой 3×3 и шапка сверху.
+            for (dy, r) in [(0, 2), (1, 2), (2, 1), (3, 1)] {
+                for dz in -r..=r {
+                    for dx in -r..=r {
+                        // Срезанные углы — крона круглее.
+                        if dx * dx + dz * dz <= r * r + 1 {
+                            put(tx + dx, top - 1 + dy, tz + dz, Block::Leaves);
+                        }
+                    }
+                }
+            }
+            for y in ground + 1..=top {
+                put(tx, y, tz, Block::Wood);
+            }
+        }
+    }
+
     Chunk::from_fn(|x, y, z| {
+        let f = flora[x + z * CHUNK_X + y * CHUNK_X * CHUNK_Z];
+        if f != Block::Air {
+            return f;
+        }
         let h = heights[x + z * CHUNK_X];
         match y as i32 {
             y if y > h => Block::Air,
@@ -90,7 +140,9 @@ mod tests {
         );
     }
 
-    const GOLDEN_CHUNK_42_0_0: u64 = 10444650581625691908;
+    // Обновлён вместе с деревьями (M4). После альфы такое изменение
+    // потребует VERSION+1 с сохранением старой формулы (§4).
+    const GOLDEN_CHUNK_42_0_0: u64 = 8179010388496247302;
 
     /// Рельеф бесшовен: блок на границе чанка совпадает с предсказанием
     /// `height` в мировых координатах — генератор не знает о чанках.

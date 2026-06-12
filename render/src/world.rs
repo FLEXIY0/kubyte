@@ -150,13 +150,7 @@ impl World {
             let cx = i32::from_le_bytes(entry[..4].try_into().ok()?);
             let cz = i32::from_le_bytes(entry[4..8].try_into().ok()?);
             let idx = u16::from_le_bytes(entry[8..10].try_into().ok()?);
-            let block = match entry[10] {
-                0 => Block::Air,
-                1 => Block::Stone,
-                2 => Block::Dirt,
-                3 => Block::Grass,
-                _ => return None,
-            };
+            let block = Block::from_id(entry[10])?;
             world.diffs.entry((cx, cz)).or_default().insert(idx, block);
             rest = tail;
         }
@@ -209,7 +203,7 @@ impl World {
                 })
             });
             let e = self.chunks.get_mut(&pos).unwrap();
-            (e.quads, e.mesh, e.meshed) = (verts.len() as u32 / 4, buffer, true);
+            (e.quads, e.mesh, e.meshed) = (verts.len() as u32 / 8, buffer, true);
             budget -= 1;
         }
 

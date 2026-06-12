@@ -39,6 +39,8 @@ pub enum Overlay {
     TopBand { palette: [[u8; 3]; 2], min_depth: u8, max_depth: u8 },
     /// Кластеры-крапинки 2×2 (камешки в земле; этим же приёмом — руды).
     Speckle { color: [u8; 3], chance: u8 },
+    /// Вертикальные полосы с дрожанием яркости — кора, доски.
+    Stripes { color: [u8; 3], period: u8 },
 }
 
 pub const STONE: Descriptor = Descriptor {
@@ -76,18 +78,45 @@ pub const GRASS_SIDE: Descriptor = Descriptor {
     },
 };
 
+pub const WOOD: Descriptor = Descriptor {
+    palette: [[74, 56, 34], [86, 66, 40], [97, 75, 46], [106, 83, 52]],
+    cell_log2: 2,
+    variation: 18,
+    overlay: Overlay::Stripes { color: [62, 46, 28], period: 4 },
+};
+
+pub const LEAVES: Descriptor = Descriptor {
+    // Темнее травы: крона читается силуэтом, не сливаясь с лугом.
+    palette: [[38, 72, 34], [46, 84, 40], [54, 96, 46], [64, 108, 52]],
+    cell_log2: 1,
+    variation: 34,
+    overlay: Overlay::Speckle { color: [30, 58, 28], chance: 64 },
+};
+
+pub const LAMP: Descriptor = Descriptor {
+    // Янтарь — тёплый полюс палитры мира (§6: контраст температур).
+    palette: [[196, 134, 56], [216, 156, 66], [232, 176, 80], [244, 196, 100]],
+    cell_log2: 1,
+    variation: 20,
+    overlay: Overlay::Speckle { color: [255, 222, 150], chance: 70 },
+};
+
 /// Таблица текстур (§1: данные вместо кода). Индекс = слой texture array.
 /// Порядок зафиксирован: на него ссылается FACE_LAYERS.
-pub const TEXTURES: &[Descriptor] = &[STONE, DIRT, GRASS_TOP, GRASS_SIDE];
+pub const TEXTURES: &[Descriptor] =
+    &[STONE, DIRT, GRASS_TOP, GRASS_SIDE, WOOD, LEAVES, LAMP];
 
 /// Слой текстуры для каждой грани блока: [материал][грань],
 /// грани в порядке нормалей рендера: +X −X +Y −Y +Z −Z.
 /// Air (0) текстуры не имеет — строка-заглушка, граней у него не бывает.
-pub const FACE_LAYERS: [[u8; 6]; 4] = [
+pub const FACE_LAYERS: [[u8; 6]; 7] = [
     [0; 6],             // Air
     [0; 6],             // Stone
     [1; 6],             // Dirt
     [3, 3, 2, 1, 3, 3], // Grass: бока, верх, дно-земля
+    [4; 6],             // Wood
+    [5; 6],             // Leaves
+    [6; 6],             // Lamp
 ];
 
 // Инварианты грамматики §5 проверяются компилятором (с приходом таблиц
@@ -145,6 +174,13 @@ pub fn bake(desc: &Descriptor, seed: u64) -> [u8; TEX_BYTES] {
                 // как объект, а не как шум-«песок».
                 Overlay::Speckle { color: c, chance } => {
                     if hash2(seed ^ 0xC3, (x / 2) as i32, (y / 2) as i32) & 0xFF < chance as u32 {
+                        color = c;
+                    }
+                }
+                // Полоса каждые `period` столбцов, с дрожанием положения.
+                Overlay::Stripes { color: c, period } => {
+                    let jitter = hash2(seed ^ 0x51, (x / period as u32) as i32, 0) & 1;
+                    if x % period as u32 == jitter {
                         color = c;
                     }
                 }

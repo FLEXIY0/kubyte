@@ -24,13 +24,43 @@ pub enum Block {
     Stone = 1,
     Dirt = 2,
     Grass = 3,
+    Wood = 4,
+    Leaves = 5,
+    /// Янтарный фонарь — носитель тёплого blocklight (§6).
+    Lamp = 6,
 }
 
 impl Block {
+    pub const COUNT: usize = 7;
+
+    /// Все варианты по номеру — единственное место декодирования id
+    /// (сейвы, сеть, инвентарь).
+    pub const fn from_id(id: u8) -> Option<Self> {
+        match id {
+            0 => Some(Block::Air),
+            1 => Some(Block::Stone),
+            2 => Some(Block::Dirt),
+            3 => Some(Block::Grass),
+            4 => Some(Block::Wood),
+            5 => Some(Block::Leaves),
+            6 => Some(Block::Lamp),
+            _ => None,
+        }
+    }
+
     /// Непрозрачен ли блок (закрывает ли соседние грани).
     #[inline]
     pub const fn solid(self) -> bool {
         !matches!(self, Block::Air)
+    }
+
+    /// Сила собственного света 0..=15 (blocklight, §6).
+    #[inline]
+    pub const fn emission(self) -> u8 {
+        match self {
+            Block::Lamp => 15,
+            _ => 0,
+        }
     }
 }
 

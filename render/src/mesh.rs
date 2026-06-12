@@ -7,17 +7,21 @@
 
 use kb_core::{Block, Chunk, CHUNK_X, CHUNK_Y, CHUNK_Z};
 
-/// Упакованная вершина чанка — один u32 (§6):
-/// биты 0..5 — x (0..=16), 5..10 — z (0..=16), 10..18 — y (0..=128),
+use crate::light::Light;
+
+/// Упакованная вершина чанка — два u32 (максимум по §6).
+/// Первый: биты 0..5 — x (0..=16), 5..10 — z (0..=16), 10..18 — y (0..=128),
 /// 18..21 — индекс нормали (+X −X +Y −Y +Z −Z), 21..29 — слой текстуры.
+/// Второй: skylight | blocklight << 4.
 #[inline]
 fn pack(p: [i32; 3], normal: u32, layer: u32) -> u32 {
     (p[0] as u32) | (p[2] as u32) << 5 | (p[1] as u32) << 10 | normal << 18 | layer << 21
 }
 
-/// Грань в маске среза: материал + направление нормали. Одинаковые грани
-/// (производный слой текстуры совпадает) — кандидаты на слияние.
-type Cell = Option<(Block, bool)>;
+/// Грань в маске среза: материал + направление нормали + свет воздушной
+/// клетки перед гранью. Сливаются только грани, одинаковые целиком —
+/// иначе greedy размазал бы свет по всему кваду.
+type Cell = Option<(Block, bool, u8)>;
 
 const DIMS: [i32; 3] = [CHUNK_X as i32, CHUNK_Y as i32, CHUNK_Z as i32];
 
@@ -43,6 +47,10 @@ pub fn build(chunk: &Chunk, neighbors: &Neighbors) -> Vec<u32> {
         }
     };
 
+    // Свет — производная тех же блоков, что и грани: считается здесь же,
+    // при ремеше, и нигде не хранится (§1).
+    let light = Light::compute(get); // замыкание Copy — остаётся и мешеру
+
     let mut verts = Vec::new();
     for d in 0..3usize {
         let (u, v) = ((d + 1) % 3, (d + 2) % 3);
@@ -58,9 +66,14 @@ pub fn build(chunk: &Chunk, neighbors: &Neighbors) -> Vec<u32> {
                 let mut b = a;
                 (a[d], b[d]) = (s - 1, s);
                 let (ba, bb) = (get(a), get(b));
+                // Свет грани — из воздушной клетки перед ней.
+                let lum = |p: [i32; 3]| {
+                    let (s, b) = light.at(p[0], p[1], p[2]);
+                    s | b << 4
+                };
                 *cell = match (ba.solid(), bb.solid()) {
-                    (true, false) => Some((ba, true)),  // нормаль +d
-                    (false, true) => Some((bb, false)), // нормаль −d
+                    (true, false) => Some((ba, true, lum(b))),  // нормаль +d
+                    (false, true) => Some((bb, false, lum(a))), // нормаль −d
                     _ => None,
                 };
             }
@@ -98,7 +111,7 @@ fn emit(
     s: i32,
     (i, j): (usize, usize),
     (w, h): (usize, usize),
-    (block, positive): (Block, bool),
+    (block, positive, lum): (Block, bool, u8),
 ) {
     let normal = (2 * d + usize::from(!positive)) as u32;
     let layer = kb_materials::FACE_LAYERS[block as usize][normal as usize] as u32;
@@ -112,7 +125,7 @@ fn emit(
         p[d] = s;
         p[u] = (i + cu) as i32;
         p[v] = (j + cv) as i32;
-        verts.push(pack(p, normal, layer));
+        verts.extend([pack(p, normal, layer), lum as u32]);
     }
 }
 
@@ -120,16 +133,16 @@ fn emit(
 mod tests {
     use super::*;
 
-    fn solo(block: Block) -> Chunk {
-        Chunk::from_fn(move |x, y, z| if (x, y, z) == (8, 8, 8) { block } else { Block::Air })
-    }
+    /// Вершина = 2 u32 → квад = 8 слов.
+    const QUAD: usize = 8;
 
     #[test]
     fn lone_block_is_six_quads() {
         let air = Chunk::from_fn(|_, _, _| Block::Air);
-        let c = solo(Block::Stone);
+        let c =
+            Chunk::from_fn(|x, y, z| if (x, y, z) == (8, 8, 8) { Block::Stone } else { Block::Air });
         let verts = build(&c, &[&air, &air, &air, &air]);
-        assert_eq!(verts.len(), 6 * 4);
+        assert_eq!(verts.len(), 6 * QUAD);
     }
 
     #[test]
@@ -137,8 +150,9 @@ mod tests {
         let slab = Chunk::from_fn(|_, y, _| if y == 0 { Block::Stone } else { Block::Air });
         let flat = build(&slab, &[&slab, &slab, &slab, &slab]);
         // Соседи такие же → боковых граней нет: один квад верха 16×16
-        // и один — дна. Greedy обязан схлопнуть 256 граней в 1.
-        assert_eq!(flat.len(), 2 * 4);
+        // и один — дна. Greedy обязан схлопнуть 256 граней в 1
+        // (свет на открытой плите везде 15 — слиянию не мешает).
+        assert_eq!(flat.len(), 2 * QUAD);
     }
 
     #[test]
@@ -146,6 +160,6 @@ mod tests {
         let full = Chunk::from_fn(|_, _, _| Block::Stone);
         let v = build(&full, &[&full, &full, &full, &full]);
         // Видимы только верх и низ столба (мир сверху/снизу — воздух).
-        assert_eq!(v.len(), 2 * 4);
+        assert_eq!(v.len(), 2 * QUAD);
     }
 }

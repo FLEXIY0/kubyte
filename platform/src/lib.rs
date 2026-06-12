@@ -195,6 +195,9 @@ impl ApplicationHandler<GfxReady> for App {
                             KeyCode::Digit1 => self.selected = Block::Stone,
                             KeyCode::Digit2 => self.selected = Block::Dirt,
                             KeyCode::Digit3 => self.selected = Block::Grass,
+                            KeyCode::Digit4 => self.selected = Block::Wood,
+                            KeyCode::Digit5 => self.selected = Block::Leaves,
+                            KeyCode::Digit6 => self.selected = Block::Lamp,
                             _ => {}
                         }
                     }

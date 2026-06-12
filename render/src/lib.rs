@@ -5,6 +5,7 @@
 //! nearest-блитом. Мир, туман и небо идут через один общий буфер —
 //! раздельная пикселизация слоёв запрещена ТЗ.
 
+mod light;
 mod math;
 mod mesh;
 mod world;
@@ -40,6 +41,41 @@ const UB_ALIGN: usize = 256;
 const WALK_SPEED: f32 = 4.3;
 /// Дистанция взаимодействия (ломание/установка), в блоках.
 const REACH: f32 = 5.0;
+
+/// Полный цикл суток, секунд (10 минут — как в эпоху беты).
+const DAY_SECONDS: f32 = 600.0;
+
+/// Цвета времени суток (§6, §14): день — нейтрально-тёплый свет и
+/// приглушённое небо; ночь — холодный лунный свет, мир выцветает,
+/// ночи темнее ванильных. Всё остальное — интерполяция.
+const SUN_DAY: [f32; 4] = [1.0, 0.97, 0.90, 1.0];
+const SUN_NIGHT: [f32; 4] = [0.45, 0.55, 0.85, 0.16];
+const SKY_DAY: [f32; 3] = [0.35, 0.52, 0.74];
+const SKY_NIGHT: [f32; 3] = [0.010, 0.014, 0.032];
+
+/// Положение солнца → факторы дня. Возвращает (sun rgba, sky rgb):
+/// плавные сумерки через smoothstep по синусу суточной фазы.
+fn daylight(time: f32) -> ([f32; 4], [f32; 3]) {
+    let phase = (time / DAY_SECONDS) * core::f32::consts::TAU;
+    // 1 в полдень, 0 в полночь, рассвет/закат — узкая полоса у горизонта.
+    let s = phase.sin();
+    let t = ((s + 0.15) / 0.4).clamp(0.0, 1.0);
+    let t = t * t * (3.0 - 2.0 * t);
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    (
+        [
+            lerp(SUN_NIGHT[0], SUN_DAY[0]),
+            lerp(SUN_NIGHT[1], SUN_DAY[1]),
+            lerp(SUN_NIGHT[2], SUN_DAY[2]),
+            lerp(SUN_NIGHT[3], SUN_DAY[3]),
+        ],
+        [
+            lerp(SKY_NIGHT[0], SKY_DAY[0]),
+            lerp(SKY_NIGHT[1], SKY_DAY[1]),
+            lerp(SKY_NIGHT[2], SKY_DAY[2]),
+        ],
+    )
+}
 
 /// Свободная камера. float здесь законен: камера — чисто визуальное
 /// состояние клиента, в симуляцию мира не входит (§6).
@@ -166,6 +202,8 @@ pub struct Gfx {
     player: kb_core::Player,
     pub mode: Mode,
     pub camera: Camera,
+    /// Игровое время суток, секунд. Стартуем утром.
+    time: f32,
 }
 
 impl Gfx {
@@ -232,7 +270,7 @@ impl Gfx {
         // --- Юниформы: камера + смещения чанков (динамический оффсет) ----
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera"),
-            size: 80, // mat4 + vec4(pos, fog)
+            size: 112, // mat4 + vec4(pos, fog) + vec4 sun + vec4 sky
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -323,9 +361,9 @@ impl Gfx {
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 4,
+                    array_stride: 8, // два u32: позиция/нормаль/слой + свет
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Uint32],
+                    attributes: &wgpu::vertex_attr_array![0 => Uint32, 1 => Uint32],
                 }],
             },
             fragment: Some(wgpu::FragmentState {
@@ -423,12 +461,21 @@ impl Gfx {
             player: kb_core::Player::new(spawn),
             mode: Mode::Walk,
             camera,
+            // Утро; KB_TIME=<сек> — отладочная перемотка суток (native).
+            #[cfg(not(target_arch = "wasm32"))]
+            time: std::env::var("KB_TIME")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DAY_SECONDS * 0.1),
+            #[cfg(target_arch = "wasm32")]
+            time: DAY_SECONDS * 0.1,
         })
     }
 
     /// Шаг геймплея: в Walk — симуляция игрока (§3: физика в /core),
     /// в Fly — носклип-камера. Камера в Walk прибита к глазам игрока.
     pub fn tick(&mut self, dt: f32, (forward, right, up): (f32, f32, f32)) {
+        self.time = (self.time + dt) % DAY_SECONDS;
         if self.mode == Mode::Fly {
             return self.camera.fly(forward, right, up, dt);
         }
@@ -523,10 +570,13 @@ impl Gfx {
             &math::perspective(1.2, aspect, 0.1, FOG_END * 2.0),
             &math::view(self.camera.pos, self.camera.yaw, self.camera.pitch),
         );
-        let mut camera_data = [0f32; 20];
+        let (sun, sky) = daylight(self.time);
+        let mut camera_data = [0f32; 28];
         camera_data[..16].copy_from_slice(bytemuck::cast_slice(&vp));
         camera_data[16..19].copy_from_slice(&self.camera.pos);
         camera_data[19] = FOG_END;
+        camera_data[20..24].copy_from_slice(&sun);
+        camera_data[24..27].copy_from_slice(&sky);
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&camera_data));
 
@@ -565,11 +615,13 @@ impl Gfx {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // Небо = цвет тумана из chunk.wgsl (сумрак §14).
+                        // Небо = цвет тумана текущего часа: дальние чанки
+                        // растворяются в небе в любое время суток.
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.030,
-                            g: 0.040,
-                            b: 0.070,
+                            // Чистка идёт до шейдеров — компенсируем sRGB.
+                            r: (sky[0] as f64).powf(2.2),
+                            g: (sky[1] as f64).powf(2.2),
+                            b: (sky[2] as f64).powf(2.2),
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
