@@ -1,12 +1,8 @@
 [package]
-name = "kb-render"
+name = "kb-worldgen"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 kb-core.workspace = true
-kb-materials.workspace = true
-kb-worldgen.workspace = true
-wgpu.workspace = true
-bytemuck.workspace = true

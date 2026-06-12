@@ -1,0 +1,88 @@
+# CI kb: тесты + готовые сборки для ручного тестирования.
+# На каждый пуш — артефакты: бинарники Linux/Windows и веб-бандл
+# (распаковать и раздать статиком либо открыть через GitHub Pages).
+
+name: ci
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Детерминизм и инварианты (§16)
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Бюджеты §9: превышение = баг = красный CI
+      - run: cargo run --release -p kb-worldgen --example bench
+      # Клиент обязан собираться под браузер
+      - run: cargo check --target wasm32-unknown-unknown -p kb
+
+  native:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: kb-linux-x86_64
+            path: target/release/kb
+          - os: windows-latest
+            artifact: kb-windows-x86_64
+            path: target/release/kb.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p kb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.path }}
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target wasm32-unknown-unknown -p kb
+      # Версия CLI обязана совпадать с версией крейта wasm-bindgen из Cargo.lock
+      - run: cargo install wasm-bindgen-cli --version "$(cargo pkgid wasm-bindgen | cut -d@ -f2)"
+      - run: |
+          wasm-bindgen --target web --no-typescript \
+            --out-dir web/pkg target/wasm32-unknown-unknown/release/kb.wasm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kb-web
+          path: web/
+      # Сайт обновляется с main; ветки тестируются артефактом kb-web
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: web/
+
+  pages:
+    needs: web
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

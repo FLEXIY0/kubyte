@@ -8,6 +8,11 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
+mod chunk;
+pub use chunk::{Block, Chunk, CHUNK_X, CHUNK_Y, CHUNK_Z, CHUNK_VOLUME};
+
 /// SplitMix64 — финализирующий миксер. Не генератор с состоянием, а чистая
 /// функция: одно и то же входное слово → одно и то же выходное. Именно
 /// поэтому он наш базовый кирпич — «мир-как-функция» требует stateless-хешей,

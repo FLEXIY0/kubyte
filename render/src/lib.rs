@@ -1,12 +1,13 @@
 //! kb-render: wgpu-рендер с ретро-пайплайном (§6).
 //!
-//! Архитектурный инвариант M0, который не меняется до конца проекта:
-//! сцена ВСЕГДА рисуется в offscreen-буфер пониженного разрешения и
-//! растягивается на экран nearest-блитом. Весь будущий рендер (чанки,
-//! туман, небо) идёт только через этот буфер — раздельная пикселизация
-//! слоёв запрещена ТЗ.
+//! Архитектурный инвариант с M0 и до конца проекта: сцена ВСЕГДА рисуется
+//! в offscreen-буфер пониженного разрешения и растягивается на экран
+//! nearest-блитом. Мир, туман и небо идут через один общий буфер —
+//! раздельная пикселизация слоёв запрещена ТЗ.
 
 mod math;
+mod mesh;
+mod world;
 
 use wgpu::util::DeviceExt;
 
@@ -17,14 +18,48 @@ const PIXEL_SCALE: u32 = 3;
 const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-/// Вершина куба M0. Чанки в M1 перейдут на упакованный u32 (§6) и свой
-/// пайплайн; кубу-демонстратору хватает простого формата.
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    pos: [f32; 3],
-    normal: [f32; 3],
-    uv: [f32; 2],
+/// Сид мира M1. Станет выбором игрока вместе с сейвами (M3).
+pub const SEED: u64 = 42;
+
+/// Дальность тумана = край прогруженного мира: дальние чанки растворяются,
+/// а не обрезаются. Цвет тумана = цвет неба (см. chunk.wgsl).
+const FOG_END: f32 = (world::VIEW_RADIUS * 16) as f32;
+
+/// Максимум чанков в кадре: полный квадрат видимости с запасом.
+const MAX_DRAWS: usize = 512;
+/// Максимум квадов в одном чанк-меше, на который рассчитан общий
+/// индексный буфер (1.5 МиБ GPU). Реальный рельеф даёт порядки меньше.
+const MAX_QUADS: usize = 65536;
+/// Выравнивание динамических оффсетов uniform-буфера (минимум WebGL2).
+const UB_ALIGN: usize = 256;
+
+/// Свободная камера. float здесь законен: камера — чисто визуальное
+/// состояние клиента, в симуляцию мира не входит (§6).
+pub struct Camera {
+    pub pos: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+impl Camera {
+    const LOOK_SPEED: f32 = 0.0025;
+    const FLY_SPEED: f32 = 24.0;
+
+    /// Сырое смещение мыши → поворот. Pitch зажат чуть до зенита,
+    /// чтобы матрица вида не вырождалась.
+    pub fn look(&mut self, dx: f32, dy: f32) {
+        self.yaw -= dx * Self::LOOK_SPEED;
+        self.pitch = (self.pitch - dy * Self::LOOK_SPEED).clamp(-1.55, 1.55);
+    }
+
+    /// Полёт: forward/right — в плоскости взгляда (по yaw), up — мировой.
+    pub fn fly(&mut self, forward: f32, right: f32, up: f32, dt: f32) {
+        let (s, c) = self.yaw.sin_cos();
+        let v = Self::FLY_SPEED * dt;
+        self.pos[0] += (-s * forward + c * right) * v;
+        self.pos[2] += (-c * forward - s * right) * v;
+        self.pos[1] += up * v;
+    }
 }
 
 /// Offscreen-цель: пересоздаётся при resize, поэтому выделена в свой тип
@@ -98,13 +133,15 @@ pub struct Gfx {
     offscreen: Offscreen,
     blit_layout: wgpu::BindGroupLayout,
     nearest: wgpu::Sampler,
-    scene_pipeline: wgpu::RenderPipeline,
+    chunk_pipeline: wgpu::RenderPipeline,
     blit_pipeline: wgpu::RenderPipeline,
     scene_bind: wgpu::BindGroup,
+    origin_bind: wgpu::BindGroup,
     camera_buf: wgpu::Buffer,
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
-    index_count: u32,
+    origins_buf: wgpu::Buffer,
+    quad_indices: wgpu::Buffer,
+    world: world::World,
+    pub camera: Camera,
 }
 
 impl Gfx {
@@ -140,54 +177,83 @@ impl Gfx {
         config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&device, &config);
 
-        // --- Сцена: куб с процедурной текстурой -------------------------
+        // --- Texture array всех материалов (§5): печётся при старте ------
+        let layers = kb_materials::TEXTURES.len() as u32;
+        let pixels: Vec<u8> = kb_materials::TEXTURES
+            .iter()
+            // Сид 0 — фиксированный сид текстур (§5): одинаково у всех.
+            .flat_map(|d| kb_materials::bake(d, 0))
+            .collect();
         let texture = device.create_texture_with_data(
             &queue,
             &wgpu::TextureDescriptor {
-                label: Some("material.stone"),
+                label: Some("materials.array"),
                 size: wgpu::Extent3d {
                     width: kb_materials::TEX_SIZE as u32,
                     height: kb_materials::TEX_SIZE as u32,
-                    depth_or_array_layers: 1,
+                    depth_or_array_layers: layers,
                 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
+                view_formats: &[],
             },
             wgpu::util::TextureDataOrder::LayerMajor,
-            // Сид 0 — фиксированный сид текстур (§5): одинаково у всех.
-            &kb_materials::bake(&kb_materials::STONE, 0),
+            &pixels,
         );
         let nearest = device.create_sampler(&wgpu::SamplerDescriptor::default());
 
+        // --- Юниформы: камера + смещения чанков (динамический оффсет) ----
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera"),
-            size: 64,
+            size: 80, // mat4 + vec4(pos, fog)
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let origins_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("chunk.origins"),
+            size: (MAX_DRAWS * UB_ALIGN) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        let scene_shader = device.create_shader_module(wgpu::include_wgsl!("scene.wgsl"));
+        // Общий индексный буфер квадов: паттерн [0,1,2, 2,1,3] на все меши
+        // сразу — чанкам остаются только вершинные буферы.
+        let quad_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("quad.ib"),
+            contents: bytemuck::cast_slice(
+                &(0..MAX_QUADS as u32)
+                    .flat_map(|q| [0, 1, 2, 2, 1, 3].map(|i| q * 4 + i))
+                    .collect::<Vec<u32>>(),
+            ),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let shader = device.create_shader_module(wgpu::include_wgsl!("chunk.wgsl"));
         let scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene.layout"),
             entries: &[
+                uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT, false),
                 wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
                     },
                     count: None,
                 },
-                texture_entry(1),
                 sampler_entry(2),
             ],
         });
+        let origin_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("origin.layout"),
+            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX, true)],
+        });
+
         let scene_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene.bind"),
             layout: &scene_layout,
@@ -208,38 +274,38 @@ impl Gfx {
                 },
             ],
         });
-
-        let (verts, idx) = cube_mesh();
-        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("cube.vb"),
-            contents: bytemuck::cast_slice(&verts),
-            usage: wgpu::BufferUsages::VERTEX,
+        let origin_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("origin.bind"),
+            layout: &origin_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &origins_buf,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(16),
+                }),
+            }],
         });
-        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("cube.ib"),
-            contents: bytemuck::cast_slice(&idx),
-            usage: wgpu::BufferUsages::INDEX,
-        });
 
-        let scene_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("scene.pipeline"),
+        let chunk_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("chunk.pipeline"),
             layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[Some(&scene_layout)],
+                bind_group_layouts: &[Some(&scene_layout), Some(&origin_layout)],
                 immediate_size: 0,
             })),
             vertex: wgpu::VertexState {
-                module: &scene_shader,
+                module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: size_of::<Vertex>() as u64,
+                    array_stride: 4,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                    attributes: &wgpu::vertex_attr_array![0 => Uint32],
                 }],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &scene_shader,
+                module: &shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(OFFSCREEN_FORMAT.into())],
@@ -264,7 +330,19 @@ impl Gfx {
         let blit_shader = device.create_shader_module(wgpu::include_wgsl!("blit.wgsl"));
         let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("blit.layout"),
-            entries: &[texture_entry(0), sampler_entry(1)],
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                sampler_entry(1),
+            ],
         });
         let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("blit.pipeline"),
@@ -294,6 +372,13 @@ impl Gfx {
 
         let offscreen = Offscreen::new(&device, size, &blit_layout, &nearest);
 
+        // Спавн — над поверхностью в начале координат, взгляд чуть вниз.
+        let camera = Camera {
+            pos: [8.0, kb_worldgen::height(SEED, 8, 8) as f32 + 12.0, 8.0],
+            yaw: 0.6,
+            pitch: -0.35,
+        };
+
         Ok(Self {
             surface,
             device,
@@ -302,13 +387,15 @@ impl Gfx {
             offscreen,
             blit_layout,
             nearest,
-            scene_pipeline,
+            chunk_pipeline,
             blit_pipeline,
             scene_bind,
+            origin_bind,
             camera_buf,
-            vertices,
-            indices,
-            index_count: idx.len() as u32,
+            origins_buf,
+            quad_indices,
+            world: world::World::new(SEED),
+            camera,
         })
     }
 
@@ -322,19 +409,35 @@ impl Gfx {
             Offscreen::new(&self.device, (width, height), &self.blit_layout, &self.nearest);
     }
 
-    /// Кадр: сцена в offscreen → nearest-блит на экран. `t` — секунды
-    /// от старта, единственное «состояние» анимации (§1: всё — функция).
-    ///
+    /// Кадр: стриминг чанков → сцена в offscreen → nearest-блит на экран.
     /// Проблемы surface (Lost/Outdated/Timeout) лечатся или пропускаются
     /// здесь же — платформе не нужно знать типы wgpu.
-    pub fn render(&mut self, t: f32) {
+    pub fn render(&mut self) {
         let aspect = self.config.width.max(1) as f32 / self.config.height.max(1) as f32;
-        let mvp = math::mul(
-            &math::perspective(1.0, aspect, 0.1, 100.0),
-            &math::spin_view(t * 0.7, 3.0),
+        let vp = math::mul(
+            &math::perspective(1.2, aspect, 0.1, FOG_END * 2.0),
+            &math::view(self.camera.pos, self.camera.yaw, self.camera.pitch),
         );
+        let mut camera_data = [0f32; 20];
+        camera_data[..16].copy_from_slice(bytemuck::cast_slice(&vp));
+        camera_data[16..19].copy_from_slice(&self.camera.pos);
+        camera_data[19] = FOG_END;
         self.queue
-            .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&mvp));
+            .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&camera_data));
+
+        let planes = math::frustum(&vp);
+        let draws = self.world.update(&self.device, self.camera.pos, &planes);
+
+        // Смещения всех видимых чанков — одной записью в буфер,
+        // по слоту UB_ALIGN на чанк (требование динамических оффсетов).
+        let mut origins = vec![0u8; draws.len().min(MAX_DRAWS) * UB_ALIGN];
+        for (i, d) in draws.iter().take(MAX_DRAWS).enumerate() {
+            origins[i * UB_ALIGN..i * UB_ALIGN + 12]
+                .copy_from_slice(bytemuck::cast_slice(&d.origin));
+        }
+        if !origins.is_empty() {
+            self.queue.write_buffer(&self.origins_buf, 0, &origins);
+        }
 
         use wgpu::CurrentSurfaceTexture as Cst;
         let frame = match self.surface.get_current_texture() {
@@ -357,11 +460,11 @@ impl Gfx {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // Глубокий сине-серый — заготовка неба «приятной тревоги» (§14).
+                        // Небо = цвет тумана из chunk.wgsl (сумрак §14).
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.012,
-                            g: 0.014,
-                            b: 0.022,
+                            r: 0.030,
+                            g: 0.040,
+                            b: 0.070,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -377,11 +480,14 @@ impl Gfx {
                 }),
                 ..Default::default()
             });
-            pass.set_pipeline(&self.scene_pipeline);
+            pass.set_pipeline(&self.chunk_pipeline);
             pass.set_bind_group(0, &self.scene_bind, &[]);
-            pass.set_vertex_buffer(0, self.vertices.slice(..));
-            pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
-            pass.draw_indexed(0..self.index_count, 0, 0..1);
+            pass.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
+            for (i, d) in draws.iter().take(MAX_DRAWS).enumerate() {
+                pass.set_bind_group(1, &self.origin_bind, &[(i * UB_ALIGN) as u32]);
+                pass.set_vertex_buffer(0, d.vertices.slice(..));
+                pass.draw_indexed(0..d.quads.min(MAX_QUADS as u32) * 6, 0, 0..1);
+            }
         }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -407,14 +513,18 @@ impl Gfx {
     }
 }
 
-fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+fn uniform_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    dynamic: bool,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: dynamic,
+            min_binding_size: None,
         },
         count: None,
     }
@@ -427,40 +537,4 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
         count: None,
     }
-}
-
-/// Куб 1×1×1 вокруг начала координат: 6 граней × 4 вершины, развёрнутые
-/// из таблицы нормалей — данные вместо шести скопированных кусков кода (§1).
-fn cube_mesh() -> ([Vertex; 24], [u16; 36]) {
-    const N: [[f32; 3]; 6] = [
-        [1.0, 0.0, 0.0],
-        [-1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
-        [0.0, -1.0, 0.0],
-        [0.0, 0.0, 1.0],
-        [0.0, 0.0, -1.0],
-    ];
-    let mut verts = [Vertex { pos: [0.0; 3], normal: [0.0; 3], uv: [0.0; 2] }; 24];
-    let mut idx = [0u16; 36];
-    for (f, n) in N.iter().enumerate() {
-        // Базис грани: u = ось, циклически следующая за нормалью, v = n × u.
-        let a = n.iter().position(|&c| c != 0.0).unwrap();
-        let (u, v) = ((a + 1) % 3, (a + 2) % 3);
-        for corner in 0..4 {
-            let (su, sv) = ((corner & 1) as f32 - 0.5, (corner >> 1) as f32 - 0.5);
-            let mut pos = [0.0f32; 3];
-            pos[a] = n[a] * 0.5;
-            pos[u] = su * n[a]; // знак держит обход CCW наружу для обеих сторон
-            pos[v] = sv;
-            verts[f * 4 + corner] = Vertex {
-                pos,
-                normal: *n,
-                uv: [su + 0.5, 0.5 - sv],
-            };
-        }
-        let base = (f * 4) as u16;
-        let quad = [0, 1, 2, 2, 1, 3].map(|i| base + i);
-        idx[f * 6..f * 6 + 6].copy_from_slice(&quad);
-    }
-    (verts, idx)
 }

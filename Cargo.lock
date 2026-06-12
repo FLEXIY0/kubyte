@@ -723,8 +723,17 @@ name = "kb-render"
 version = "0.0.1"
 dependencies = [
  "bytemuck",
+ "kb-core",
  "kb-materials",
+ "kb-worldgen",
  "wgpu",
+]
+
+[[package]]
+name = "kb-worldgen"
+version = "0.0.1"
+dependencies = [
+ "kb-core",
 ]
 
 [[package]]

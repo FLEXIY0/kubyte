@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "materials", "render", "platform"]
+members = ["core", "materials", "worldgen", "render", "platform"]
 
 [workspace.package]
 version = "0.0.1"
@@ -18,6 +18,7 @@ strip = true
 [workspace.dependencies]
 kb-core = { path = "core" }
 kb-materials = { path = "materials" }
+kb-worldgen = { path = "worldgen" }
 kb-render = { path = "render" }
 
 # Каждая зависимость обоснована (§2):
