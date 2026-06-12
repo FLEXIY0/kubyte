@@ -1,0 +1,29 @@
+[package]
+name = "kb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+# cdylib — для wasm-bindgen; rlib — чтобы тесты и native-бинарник видели крейт.
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "kb"
+path = "src/main.rs"
+
+[dependencies]
+kb-render.workspace = true
+winit.workspace = true
+web-time.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Связка с браузером: точка входа, async-инициализация wgpu, канвас в DOM,
+# паники в console. Все четыре — стандартный минимум wasm-таргета.
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Document", "Window", "Element"] }
+console_error_panic_hook = "0.1"

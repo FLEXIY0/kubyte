@@ -1,0 +1,10 @@
+[package]
+name = "kb-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kb-materials.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true

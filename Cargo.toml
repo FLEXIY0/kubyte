@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["core", "materials", "render", "platform"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "GPL-3.0-only"
+
+# §9: дистрибутив ≤ 10 МБ — жмём размер, а не скорость компиляции.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[workspace.dependencies]
+kb-core = { path = "core" }
+kb-materials = { path = "materials" }
+kb-render = { path = "render" }
+
+# Каждая зависимость обоснована (§2):
+# wgpu      — единственный рендер-бэкенд на все платформы (требование ТЗ).
+# winit     — окно и ввод (требование ТЗ).
+# bytemuck  — безопасный каст вершин/юниформов в байты, нулевая стоимость.
+# pollster  — block_on для async-инициализации wgpu на нативе (3 строки кода).
+# web-time  — Instant, работающий и на нативе, и в WASM (на нативе = std).
+wgpu = "29"
+winit = "0.30"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+web-time = "1"
