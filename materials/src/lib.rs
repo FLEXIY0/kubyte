@@ -61,6 +61,11 @@ pub struct Descriptor {
     /// 0..3 — фиксированный цвет (структура), где TRANSPARENT — дырка.
     /// Так блок становится «ближе к исходнику», а не чистым шумом.
     pub pattern: Pattern,
+    /// Разброс структуры МЕЖДУ вариантами (§5): сколько обменов соседних
+    /// ячеек делает каждый вариант своим сидом. 0 — все 16 вариантов
+    /// со структурой один-в-один (фиксированный рисунок), выше — блоки
+    /// в мире всё реже похожи друг на друга. Цвета и дырки сохраняются.
+    pub pattern_jitter: u8,
 }
 
 /// Оверлеи — те самые «полосы и крапинки» из §5: маленький закрытый
@@ -91,6 +96,7 @@ pub const STONE: Descriptor = Descriptor {
     spread: 14,
     overlay: Overlay::None,
     pattern: AUTO_PATTERN,
+    pattern_jitter: 0,
 };
 
 pub const DIRT: Descriptor = Descriptor {
@@ -101,6 +107,7 @@ pub const DIRT: Descriptor = Descriptor {
     spread: 18,
     overlay: Overlay::Speckle { color: [88, 58, 40], chance: 35 },
     pattern: AUTO_PATTERN,
+    pattern_jitter: 0,
 };
 
 pub const GRASS_TOP: Descriptor = Descriptor {
@@ -112,6 +119,7 @@ pub const GRASS_TOP: Descriptor = Descriptor {
     spread: 16,
     overlay: Overlay::Speckle { color: [86, 146, 48], chance: 12 },
     pattern: AUTO_PATTERN,
+    pattern_jitter: 0,
 };
 
 pub const GRASS_SIDE: Descriptor = Descriptor {
@@ -127,6 +135,7 @@ pub const GRASS_SIDE: Descriptor = Descriptor {
         max_depth: 4,
     },
     pattern: AUTO_PATTERN,
+    pattern_jitter: 0,
 };
 
 pub const WOOD: Descriptor = Descriptor {
@@ -137,6 +146,7 @@ pub const WOOD: Descriptor = Descriptor {
     spread: 12,
     overlay: Overlay::Stripes { color: [52, 40, 25], period: 3 },
     pattern: AUTO_PATTERN,
+    pattern_jitter: 0,
 };
 
 pub const LEAVES: Descriptor = Descriptor {
@@ -148,6 +158,7 @@ pub const LEAVES: Descriptor = Descriptor {
     spread: 22,
     overlay: Overlay::Speckle { color: [10, 26, 10], chance: 96 },
     pattern: AUTO_PATTERN,
+    pattern_jitter: 0,
 };
 
 pub const LAMP: Descriptor = Descriptor {
@@ -158,6 +169,7 @@ pub const LAMP: Descriptor = Descriptor {
     spread: 10,
     overlay: Overlay::Speckle { color: [255, 222, 150], chance: 70 },
     pattern: AUTO_PATTERN,
+    pattern_jitter: 0,
 };
 
 /// «Кожа» мобов — те же дескрипторы, что у блоков (§1: один генератор
@@ -169,6 +181,7 @@ pub const PIG: Descriptor = Descriptor {
     spread: 12,
     overlay: Overlay::Speckle { color: [178, 108, 110], chance: 24 },
     pattern: AUTO_PATTERN,
+    pattern_jitter: 0,
 };
 
 pub const ZOMBIE: Descriptor = Descriptor {
@@ -179,6 +192,7 @@ pub const ZOMBIE: Descriptor = Descriptor {
     spread: 14,
     overlay: Overlay::Speckle { color: [44, 62, 46], chance: 60 },
     pattern: AUTO_PATTERN,
+    pattern_jitter: 0,
 };
 
 /// Таблица текстур (§1: данные вместо кода). Индекс = слой texture array.
@@ -240,6 +254,30 @@ fn value_noise(seed: u64, x: u32, y: u32, cell_log2: u8) -> i32 {
     lerp(top, bot, fy)
 }
 
+/// Перетасовка паттерна для одного варианта: `strength` обменов соседних
+/// ячеек, детерминированно от `seed`. Возвращает копию; оригинал в
+/// дескрипторе не трогаем. strength=0 или всё-AUTO → копия без изменений
+/// (обмен AUTO↔AUTO ничего не меняет → байт-в-байт как раньше).
+fn jitter_pattern(base: &Pattern, seed: u64, strength: u8) -> Pattern {
+    let mut p = *base;
+    let mut s = seed ^ 0x5EED_1357;
+    for _ in 0..strength as u32 {
+        s = kb_core::splitmix64(s);
+        let idx = (s % (TEX_SIZE * TEX_SIZE) as u64) as usize;
+        let (x, y) = (idx % TEX_SIZE, idx / TEX_SIZE);
+        // Обмен с соседом по направлению из старших бит того же слова.
+        let (nx, ny) = match (s >> 32) & 3 {
+            0 if x + 1 < TEX_SIZE => (x + 1, y),
+            1 if x > 0 => (x - 1, y),
+            2 if y + 1 < TEX_SIZE => (x, y + 1),
+            3 if y > 0 => (x, y - 1),
+            _ => continue,
+        };
+        p.swap(idx, ny * TEX_SIZE + nx);
+    }
+    p
+}
+
 /// Печёт текстуру материала в готовые RGBA-байты.
 ///
 /// Два независимых шумовых слоя: крупный выбирает цвет из палитры,
@@ -250,16 +288,20 @@ pub fn bake(desc: &Descriptor, seed: u64) -> [u8; TEX_BYTES] {
     // Тон варианта: лёгкий общий сдвиг яркости ±5% — варианты блока
     // различимы и в упор, и силуэтом издалека, оставаясь «той же сутью».
     let tone = ((hash2(seed, -1, -1) & 0xFF) as i32 - 128) * desc.spread as i32 / 128;
+    // Структура этого варианта: паттерн, перетасованный его же сидом.
+    // У каждого варианта своя раскладка → блоки в мире различаются, при
+    // этом набор цветов и дырок сохранён (§5: «контролируемый хаос»).
+    let pattern = jitter_pattern(&desc.pattern, seed, desc.pattern_jitter);
     for y in 0..TEX_SIZE as u32 {
         for x in 0..TEX_SIZE as u32 {
             let i = y as usize * TEX_SIZE + x as usize;
             // Прозрачная ячейка паттерна: out уже нулевой → alpha 0.
-            if desc.pattern[i] == TRANSPARENT {
+            if pattern[i] == TRANSPARENT {
                 continue;
             }
             // База: фиксированный цвет рисунка (структура §5) либо, для
             // AUTO, процедурный шум + оверлей — как было до паттернов.
-            let cell = desc.pattern[i];
+            let cell = pattern[i];
             let color = if (cell as usize) < 4 {
                 desc.palette[cell as usize]
             } else {
@@ -342,5 +384,26 @@ mod tests {
         assert_eq!(&tex[0..3], &STONE.palette[2]); // точный цвет рисунка
         assert_eq!(tex[3], 255); // непрозрачна
         assert_eq!(tex[7], 0); // соседняя — прозрачна (alpha 0)
+    }
+
+    /// При jitter>0 разные варианты дают разную раскладку (блоки в мире
+    /// не одинаковы), но при jitter=0 — идентичны (фиксированный рисунок).
+    #[test]
+    fn jitter_makes_variants_differ() {
+        let mut d = STONE;
+        d.variation = 0;
+        d.spread = 0;
+        // Рисунок из двух цветов в шахматку, чтобы перестановки были видны.
+        for (i, c) in d.pattern.iter_mut().enumerate() {
+            *c = (i % 2) as u8;
+        }
+        let a0 = bake(&d, variant_seed(0, 0));
+        let b0 = bake(&d, variant_seed(0, 1));
+        assert_eq!(a0, b0, "jitter=0 → варианты одинаковы");
+
+        d.pattern_jitter = 24;
+        let a = bake(&d, variant_seed(0, 0));
+        let b = bake(&d, variant_seed(0, 1));
+        assert_ne!(a, b, "jitter>0 → варианты различаются");
     }
 }

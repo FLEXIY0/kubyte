@@ -110,8 +110,11 @@ impl Editor {
             s = kb_core::splitmix64(s);
             s
         };
+        // Сила одноразовой перетасовки берётся из того же ползунка, что и
+        // разброс между блоками: одна «ручка интенсивности».
+        let swaps = self.blocks[self.sel].desc.pattern_jitter as u32 * 4 + 12;
         let pat = &mut self.blocks[self.sel].desc.pattern;
-        for _ in 0..96 {
+        for _ in 0..swaps {
             let i = (rng() % 256) as usize;
             let (x, y) = (i % TEX_SIZE, i / TEX_SIZE);
             let (nx, ny) = match rng() % 4 {
@@ -308,7 +311,13 @@ impl Editor {
                 )
                 .changed();
             changed |= ui
-                .add(egui::Slider::new(&mut desc.spread, 0..=64).text("разнообразность вариантов"))
+                .add(egui::Slider::new(&mut desc.spread, 0..=64).text("разброс яркости вариантов"))
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut desc.pattern_jitter, 0..=64)
+                        .text("разброс структуры между блоками"),
+                )
                 .changed();
 
             ui.separator();
@@ -630,14 +639,23 @@ fn analyze(img: &image::RgbaImage) -> Descriptor {
     let variation = (grain / cnt.max(1) as f32).round().clamp(0.0, MAX_VARIATION as f32) as u8;
 
     // Оверлей не нужен: всю структуру несёт паттерн (оверлей действует
-    // только на AUTO-ячейки, которых после анализа нет).
-    Descriptor { palette, cell_log2: 0, variation, spread: 12, overlay: Overlay::None, pattern }
+    // только на AUTO-ячейки, которых после анализа нет). pattern_jitter
+    // по умолчанию ненулевой — чтобы блоки в мире сразу различались.
+    Descriptor {
+        palette,
+        cell_log2: 0,
+        variation,
+        spread: 12,
+        overlay: Overlay::None,
+        pattern,
+        pattern_jitter: 16,
+    }
 }
 
 /// Генерирует запись таблицы как валидный Rust (§12: выход — код).
 fn gen_code(name: &str, d: &Descriptor) -> String {
     format!(
-        "pub const {}: Descriptor = Descriptor {{\n    palette: {:?},\n    cell_log2: {},\n    variation: {},\n    spread: {},\n    overlay: {},\n    pattern: {},\n}};\n\n",
+        "pub const {}: Descriptor = Descriptor {{\n    palette: {:?},\n    cell_log2: {},\n    variation: {},\n    spread: {},\n    overlay: {},\n    pattern: {},\n    pattern_jitter: {},\n}};\n\n",
         name.to_uppercase(),
         d.palette,
         d.cell_log2,
@@ -645,6 +663,7 @@ fn gen_code(name: &str, d: &Descriptor) -> String {
         d.spread,
         overlay_code(&d.overlay),
         pattern_code(&d.pattern),
+        d.pattern_jitter,
     )
 }
 
