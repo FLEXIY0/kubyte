@@ -82,6 +82,8 @@ struct App {
     last_frame: Option<Instant>,
     /// Слот хотбара (цифры 1–9 и колесо мыши, как в оригинале).
     selected: usize,
+    /// Позиция курсора (для кликов по меню паузы).
+    cursor: (f32, f32),
 }
 
 impl App {
@@ -95,6 +97,15 @@ impl App {
                 .or_else(|_| w.set_cursor_grab(CursorGrabMode::Confined))
                 .is_ok();
         w.set_cursor_visible(!self.grabbed);
+    }
+
+    /// Исполняет действие, выбранное в меню паузы.
+    fn apply_menu(&mut self, action: kb_render::MenuAction) {
+        match action {
+            kb_render::MenuAction::OpenEditor => open_editor(),
+            kb_render::MenuAction::Close => self.grab(true), // вернуться в игру
+            kb_render::MenuAction::None => {}
+        }
     }
 }
 
@@ -184,7 +195,20 @@ impl ApplicationHandler<GfxReady> for App {
                     gfx.resize(s.width, s.height);
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x as f32, position.y as f32);
+            }
             WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
+                // Меню открыто — клик идёт по меню, а не по миру.
+                if let Some(gfx) = &mut self.gfx {
+                    if gfx.menu_open() {
+                        if button == MouseButton::Left {
+                            let act = gfx.menu_click(self.cursor.0, self.cursor.1);
+                            self.apply_menu(act);
+                        }
+                        return;
+                    }
+                }
                 // Первый клик захватывает мышь, дальше кликаем по миру.
                 if !self.grabbed {
                     return self.grab(true);
@@ -219,18 +243,26 @@ impl ApplicationHandler<GfxReady> for App {
                 if let PhysicalKey::Code(code) = key.physical_key {
                     // Меню паузы перехватывает ввод, когда открыто.
                     if key.state.is_pressed() {
-                        if let Some(gfx) = &mut self.gfx {
-                            if gfx.menu_open() {
+                        let menu = self.gfx.as_ref().is_some_and(|g| g.menu_open());
+                        if menu {
+                            let mut action = kb_render::MenuAction::None;
+                            if let Some(gfx) = &mut self.gfx {
                                 match code {
-                                    KeyCode::Escape => gfx.toggle_menu(),
+                                    KeyCode::Escape => {
+                                        gfx.set_menu(false);
+                                        action = kb_render::MenuAction::Close;
+                                    }
                                     KeyCode::ArrowUp => gfx.menu_move(-1),
                                     KeyCode::ArrowDown => gfx.menu_move(1),
-                                    KeyCode::ArrowLeft => gfx.menu_adjust(-1),
-                                    KeyCode::ArrowRight => gfx.menu_adjust(1),
+                                    KeyCode::ArrowLeft => action = gfx.menu_adjust(-1),
+                                    KeyCode::ArrowRight | KeyCode::Enter => {
+                                        action = gfx.menu_activate(1)
+                                    }
                                     _ => {}
                                 }
-                                return; // игровой ввод не обрабатываем
                             }
+                            self.apply_menu(action);
+                            return; // игровой ввод не обрабатываем
                         }
                     }
                     if key.state.is_pressed() {
@@ -318,6 +350,7 @@ pub fn run() {
         grabbed: false,
         last_frame: None,
         selected: 0,
+        cursor: (0.0, 0.0),
     };
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -5,6 +5,7 @@
 //! nearest-блитом. Мир, туман и небо идут через один общий буфер —
 //! раздельная пикселизация слоёв запрещена ТЗ.
 
+mod font;
 mod light;
 mod math;
 mod mesh;
@@ -205,6 +206,7 @@ struct Offscreen {
 }
 
 impl Offscreen {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         device: &wgpu::Device,
         surface_size: (u32, u32),
@@ -213,6 +215,7 @@ impl Offscreen {
         sampler: &wgpu::Sampler,
         hud: &wgpu::Buffer,
         atlas: &wgpu::TextureView,
+        ui: &wgpu::TextureView,
     ) -> Self {
         let size = wgpu::Extent3d {
             width: (surface_size.0 / scale).max(1),
@@ -263,10 +266,37 @@ impl Offscreen {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(atlas),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(ui),
+                },
             ],
         });
         Self { color, depth, blit_bind }
     }
+}
+
+/// Действие, выбранное в меню паузы (платформа исполняет).
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum MenuAction {
+    None,
+    OpenEditor,
+    Close,
+}
+
+/// Размеры панели меню в GUI-пикселях (общие для блита и хит-теста).
+const MENU_W: f32 = 160.0;
+const MENU_H: f32 = 88.0;
+const MENU_ROWS: u32 = 4;
+
+/// Печёт текстуру ярлыков меню (прозрачная, белый текст) под панель.
+fn bake_menu_labels() -> (u32, u32, Vec<u8>) {
+    let (w, h) = (MENU_W as usize, MENU_H as usize);
+    let mut buf = vec![0u8; w * h * 4];
+    for (r, label) in ["PIXELS", "DITHER", "EDITOR", "RESUME"].iter().enumerate() {
+        font::draw_text(&mut buf, w, 8, 8 + r * 18 + 3, label);
+    }
+    (w as u32, h as u32, buf)
 }
 
 pub struct Gfx {
@@ -293,6 +323,7 @@ pub struct Gfx {
     cube_ib: wgpu::Buffer,
     hud_buf: wgpu::Buffer,
     atlas: wgpu::TextureView,
+    ui_tex: wgpu::TextureView,
     world: world::World,
     player: kb_core::Player,
     mobs: mobs::Mobs,
@@ -378,6 +409,26 @@ impl Gfx {
         );
         let nearest = device.create_sampler(&wgpu::SamplerDescriptor::default());
         let atlas = texture.create_view(&Default::default());
+
+        // Текстура ярлыков меню — печётся один раз пиксельным шрифтом.
+        let (uw, uh, ui_px) = bake_menu_labels();
+        let ui_tex = device
+            .create_texture_with_data(
+                &queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("ui.labels"),
+                    size: wgpu::Extent3d { width: uw, height: uh, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &ui_px,
+            )
+            .create_view(&Default::default());
 
         // --- Юниформы: камера + смещения чанков (динамический оффсет) ----
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -684,6 +735,17 @@ impl Gfx {
                     },
                     count: None,
                 },
+                // Текстура ярлыков меню.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -712,8 +774,9 @@ impl Gfx {
             cache: None,
         });
 
-        let offscreen =
-            Offscreen::new(&device, size, PIXEL_SCALE, &blit_layout, &nearest, &hud_buf, &atlas);
+        let offscreen = Offscreen::new(
+            &device, size, PIXEL_SCALE, &blit_layout, &nearest, &hud_buf, &atlas, &ui_tex,
+        );
 
         // Спавн — на поверхности в начале координат.
         // KB_PITCH / KB_YAW (радианы) — отладочный стартовый взгляд (native).
@@ -754,6 +817,7 @@ impl Gfx {
             cube_ib,
             hud_buf,
             atlas,
+            ui_tex,
             world: world::World::new(SEED),
             player: kb_core::Player::new(spawn),
             mobs: mobs::Mobs::new(),
@@ -788,22 +852,63 @@ impl Gfx {
     pub fn toggle_menu(&mut self) {
         self.menu_open = !self.menu_open;
     }
-
-    /// Перемещение по пунктам меню (2 пункта).
-    pub fn menu_move(&mut self, delta: i32) {
-        self.menu_sel = (self.menu_sel as i32 + delta).rem_euclid(2) as u32;
+    pub fn set_menu(&mut self, open: bool) {
+        self.menu_open = open;
     }
 
-    /// Изменение выбранной настройки. Масштаб пикселей пересоздаёт
-    /// offscreen-буфер (§6: integer scaling ×1–4).
-    pub fn menu_adjust(&mut self, delta: i32) {
+    /// Перемещение по пунктам меню (PIXELS / DITHER / EDITOR / RESUME).
+    pub fn menu_move(&mut self, delta: i32) {
+        self.menu_sel = (self.menu_sel as i32 + delta).rem_euclid(MENU_ROWS as i32) as u32;
+    }
+
+    /// Активация/изменение текущего пункта. Возвращает действие платформе.
+    pub fn menu_activate(&mut self, delta: i32) -> MenuAction {
         match self.menu_sel {
             0 => {
                 self.pixel_scale = (self.pixel_scale as i32 + delta).clamp(1, 4) as u32;
                 self.remake_offscreen();
+                MenuAction::None
             }
-            _ => self.dither = !self.dither,
+            1 => {
+                self.dither = !self.dither;
+                MenuAction::None
+            }
+            2 => MenuAction::OpenEditor,
+            _ => {
+                self.menu_open = false;
+                MenuAction::Close
+            }
         }
+    }
+    // Совместимость: стрелки влево/вправо = изменение значения.
+    pub fn menu_adjust(&mut self, delta: i32) -> MenuAction {
+        self.menu_activate(delta)
+    }
+
+    /// Клик мышью по меню: физические координаты курсора → строка → действие.
+    pub fn menu_click(&mut self, phys_x: f32, phys_y: f32) -> MenuAction {
+        const GUI: f32 = 2.0;
+        let (sw, sh) = (self.config.width as f32 / GUI, self.config.height as f32 / GUI);
+        let mx = phys_x / GUI - (sw / 2.0 - MENU_W / 2.0);
+        let my = phys_y / GUI - (sh / 2.0 - MENU_H / 2.0);
+        if !(0.0..MENU_W).contains(&mx) || my < 8.0 {
+            return MenuAction::None;
+        }
+        let row = ((my - 8.0) / 18.0) as i32;
+        if !(0..MENU_ROWS as i32).contains(&row) {
+            return MenuAction::None;
+        }
+        self.menu_sel = row as u32;
+        // Для масштаба — клик по конкретному пипсу ставит значение.
+        if row == 0 {
+            let lx = mx - 96.0;
+            if (0.0..48.0).contains(&lx) {
+                self.pixel_scale = (lx / 12.0) as u32 + 1;
+                self.remake_offscreen();
+                return MenuAction::None;
+            }
+        }
+        self.menu_activate(1)
     }
 
     fn remake_offscreen(&mut self) {
@@ -815,6 +920,7 @@ impl Gfx {
             &self.nearest,
             &self.hud_buf,
             &self.atlas,
+            &self.ui_tex,
         );
     }
 
@@ -932,6 +1038,7 @@ impl Gfx {
             &self.nearest,
             &self.hud_buf,
             &self.atlas,
+            &self.ui_tex,
         );
     }
 

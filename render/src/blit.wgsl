@@ -20,6 +20,7 @@ struct Hud {
 };
 @group(0) @binding(2) var<uniform> hud: Hud;
 @group(0) @binding(3) var atlas: texture_2d_array<f32>;
+@group(0) @binding(4) var ui: texture_2d<f32>; // ярлыки меню
 
 // Масштаб GUI: 1 GUI-пиксель = 2 экранных (дефолт эпохи).
 const GUI: f32 = 2.0;
@@ -148,45 +149,39 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // --- Меню паузы (§6: настройки) --------------------------------------
     if hud.menu.x > 0.5 {
         color *= 0.35; // затемняем мир
-        // Панель 120×54 GUI-px по центру.
-        let pw = 120.0;
-        let ph = 54.0;
+        let pw = 160.0;
+        let ph = 88.0;
         let m = vec2(g.x - (size.x / 2.0 - pw / 2.0), g.y - (size.y / 2.0 - ph / 2.0));
         if all(m >= vec2(0.0)) && all(m < vec2(pw, ph)) {
-            color = mix(color, vec3(0.07, 0.08, 0.10), 0.85);
+            color = mix(color, vec3(0.07, 0.08, 0.10), 0.88);
             if m.x < 1.0 || m.x >= pw - 1.0 || m.y < 1.0 || m.y >= ph - 1.0 {
                 color = vec3(0.55);
             }
-            // Две строки настроек по 18 px; подсветка выбранной.
+            // Четыре строки по 18 px: PIXELS / DITHER / EDITOR / RESUME.
             let row = floor((m.y - 8.0) / 18.0);
             let inrow = m.y - 8.0 - row * 18.0;
-            if row >= 0.0 && row < 2.0 && inrow >= 0.0 && inrow < 14.0 && m.x >= 8.0 && m.x < pw - 8.0 {
+            if row >= 0.0 && row < 4.0 && inrow >= 0.0 && inrow < 16.0 {
                 if row == hud.menu.y {
-                    color = mix(color, vec3(0.20, 0.28, 0.40), 0.6);
+                    color = mix(color, vec3(0.20, 0.28, 0.40), 0.6); // подсветка
                 }
-                let lx = m.x - 8.0;
+                let lx = m.x - 96.0; // колонка управления справа
                 if row == 0.0 {
                     // Масштаб пикселей: 4 пипса, залитые = текущий.
                     let pip = floor(lx / 12.0);
-                    if pip >= 0.0 && pip < 4.0 && inrow >= 3.0 && inrow < 11.0
+                    if pip >= 0.0 && pip < 4.0 && inrow >= 4.0 && inrow < 12.0
                         && (lx - pip * 12.0) >= 0.0 && (lx - pip * 12.0) < 8.0 {
-                        if pip < hud.menu.z {
-                            color = vec3(0.85);
-                        } else {
-                            color = vec3(0.25);
-                        }
+                        color = select(vec3(0.25), vec3(0.85), pip < hud.menu.z);
                     }
-                } else {
+                } else if row == 1.0 {
                     // Дизеринг: квадрат-индикатор (зелёный вкл / серый выкл).
-                    if lx >= 0.0 && lx < 10.0 && inrow >= 2.0 && inrow < 12.0 {
-                        if hud.menu.w > 0.5 {
-                            color = vec3(0.35, 0.80, 0.40);
-                        } else {
-                            color = vec3(0.30);
-                        }
+                    if lx >= 0.0 && lx < 12.0 && inrow >= 3.0 && inrow < 13.0 {
+                        color = select(vec3(0.30), vec3(0.35, 0.80, 0.40), hud.menu.w > 0.5);
                     }
                 }
             }
+            // Поверх — ярлыки из текстуры (белый текст слева).
+            let lab = textureSampleLevel(ui, samp, m / vec2(pw, ph), 0.0);
+            color = mix(color, lab.rgb, lab.a);
         }
     }
 
