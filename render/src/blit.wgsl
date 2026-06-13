@@ -21,6 +21,14 @@ const HEART = array<u32, 9>(
     0x0D8u, 0x1FCu, 0x1FCu, 0x1FCu, 0x0F8u, 0x070u, 0x020u, 0x000u, 0x000u,
 );
 
+// Внутри ли (x,y) силуэта сердца.
+fn heart_at(x: i32, y: i32) -> bool {
+    if x < 0 || x > 8 || y < 0 || y > 8 {
+        return false;
+    }
+    return ((HEART[y] >> u32(8 - x)) & 1u) == 1u;
+}
+
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -95,22 +103,30 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // --- Сердца: над левым краем хотбара, y = низ − 32 -------------------
-    let hy = g.y - (size.y - 32.0);
-    if hy >= 0.0 && hy < 9.0 {
-        let hi = floor((g.x - x0) / 8.0); // шаг 8 — сердца внахлёст
-        let hx = g.x - x0 - hi * 8.0;
-        if hi >= 0.0 && hi < 10.0 && hx >= 0.0 && hx < 9.0 {
-            let bit = (HEART[u32(hy)] >> (8u - u32(hx))) & 1u;
-            if bit == 1u {
-                let full = hi * 2.0 + 2.0 <= hud.x;
-                let half = !full && hi * 2.0 + 1.0 <= hud.x && hx < 4.0;
-                if full || half {
-                    color = vec3(0.80, 0.11, 0.13);
-                } else {
-                    color = vec3(0.15, 0.04, 0.05); // пустая ячейка
+    // --- Сердца: над левым краем хотбара ---------------------------------
+    // Шаг 10; силуэт сдвинут на +1 внутрь ячейки (body = heart_at(hx-1)),
+    // поэтому обводка слева (hx=0) и справа (hx=8) целиком влезает в ячейку.
+    let hy = g.y - (size.y - 33.0);
+    let hi = floor((g.x - x0) / 10.0);
+    let hx = i32(floor(g.x - x0 - hi * 10.0));
+    let hyi = i32(floor(hy));
+    if hi >= 0.0 && hi < 10.0 && hyi >= -1 && hyi <= 9 && hx >= 0 && hx <= 9 {
+        let idx = i32(hi);
+        if heart_at(hx - 1, hyi) {
+            let full = f32(idx) * 2.0 + 2.0 <= hud.x;
+            let half = !full && f32(idx) * 2.0 + 1.0 <= hud.x && hx <= 4;
+            if full || half {
+                color = vec3(0.82, 0.12, 0.14);
+                // Блик: ровный квадрат 2×2 на верхней левой доле.
+                if (hx == 2 || hx == 3) && (hyi == 1 || hyi == 2) {
+                    color = vec3(1.0, 0.66, 0.66);
                 }
+            } else {
+                color = vec3(0.16, 0.04, 0.05); // пустая ячейка
             }
+        } else if heart_at(hx - 2, hyi) || heart_at(hx, hyi)
+            || heart_at(hx - 1, hyi - 1) || heart_at(hx - 1, hyi + 1) {
+            color = vec3(0.0); // чёрная обводка по всему контуру
         }
     }
 
