@@ -6,6 +6,7 @@
 //! раздельная пикселизация слоёв запрещена ТЗ.
 
 mod font;
+mod icon;
 mod light;
 mod math;
 mod mesh;
@@ -14,22 +15,42 @@ mod world;
 
 use wgpu::util::DeviceExt;
 
-/// Платформе нужен словарь блоков (выбор в хотбаре) без зависимости от ядра.
 pub use kb_core::Block;
 
-/// Хотбар: 9 слотов как в бете, занято 6. Иконки рисует blit-шейдер —
-/// его таблица слоёв обязана совпадать с этой (см. SLOT_LAYERS в blit.wgsl).
-pub const HOTBAR: [Option<Block>; 9] = [
-    Some(Block::Stone),
-    Some(Block::Dirt),
-    Some(Block::Grass),
-    Some(Block::Wood),
-    Some(Block::Leaves),
-    Some(Block::Lamp),
-    None,
-    None,
-    None,
-];
+/// Число слотов хотбара/инвентаря.
+pub const SLOTS: usize = 9;
+
+/// Инвентарь выживания: слоты заполняются добытым (§7), а не выдаются
+/// заранее. Каждый слот — стопка одного блока.
+#[derive(Default)]
+struct Inventory {
+    slots: [Option<(Block, u16)>; SLOTS],
+}
+
+impl Inventory {
+    /// Кладёт добытый блок: в существующую стопку или первый пустой слот.
+    fn add(&mut self, b: Block) {
+        if let Some(s) = self.slots.iter_mut().flatten().find(|(bb, _)| *bb == b) {
+            s.1 = s.1.saturating_add(1);
+            return;
+        }
+        if let Some(s) = self.slots.iter_mut().find(|s| s.is_none()) {
+            *s = Some((b, 1));
+        }
+    }
+
+    /// Забирает один блок из слота (установка). Пустеет при нуле.
+    fn take(&mut self, slot: usize) -> Option<Block> {
+        let s = self.slots.get_mut(slot)?;
+        let (b, c) = s.as_mut()?;
+        let block = *b;
+        *c -= 1;
+        if *c == 0 {
+            *s = None;
+        }
+        Some(block)
+    }
+}
 
 /// Юниформ HUD для блита: динамика (hp/слот) + стиль из kb_materials::HUD.
 /// std140-раскладка: все поля выровнены на 16 байт (vec4).
@@ -49,6 +70,8 @@ struct HudUniform {
     // Меню/настройки: x — открыто, y — выбранный пункт, z — масштаб
     // пикселей (для пипсов), w — дизеринг вкл.
     menu: [f32; 4],
+    // Слоты хотбара: .x — id блока (255 = пусто), .y — количество в стопке.
+    slots: [[u32; 4]; SLOTS],
 }
 
 fn srgb3(c: [u8; 3]) -> [f32; 4] {
@@ -56,6 +79,7 @@ fn srgb3(c: [u8; 3]) -> [f32; 4] {
 }
 
 impl HudUniform {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         style: &kb_materials::HudStyle,
         hp: i8,
@@ -63,11 +87,18 @@ impl HudUniform {
         sel: u32,
         gui: u32,
         menu: [f32; 4],
+        inv: &Inventory,
     ) -> Self {
         let mut rows = [[0u32; 4]; 9];
         for (i, r) in rows.iter_mut().enumerate() {
             r[0] = style.heart[i] as u32;
             r[1] = style.glint[i] as u32;
+        }
+        let mut slots = [[255u32, 0, 0, 0]; SLOTS];
+        for (s, item) in slots.iter_mut().zip(&inv.slots) {
+            if let Some((b, c)) = item {
+                *s = [*b as u32, *c as u32, 0, 0];
+            }
         }
         let mut bar_bg = srgb3([style.bar_bg[0], style.bar_bg[1], style.bar_bg[2]]);
         bar_bg[3] = style.bar_bg[3] as f32 / 255.0; // сила наложения подложки
@@ -82,6 +113,7 @@ impl HudUniform {
             bar_border: srgb3(style.bar_border),
             bar_sel: srgb3(style.bar_sel),
             menu,
+            slots,
         }
     }
 }
@@ -223,6 +255,7 @@ impl Offscreen {
         hud: &wgpu::Buffer,
         atlas: &wgpu::TextureView,
         ui: &wgpu::TextureView,
+        icons: &wgpu::TextureView,
     ) -> Self {
         let size = wgpu::Extent3d {
             width: (surface_size.0 / scale).max(1),
@@ -276,6 +309,10 @@ impl Offscreen {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(ui),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(icons),
                 },
             ],
         });
@@ -331,13 +368,17 @@ pub struct Gfx {
     hud_buf: wgpu::Buffer,
     atlas: wgpu::TextureView,
     ui_tex: wgpu::TextureView,
+    icons: wgpu::TextureView,
     world: world::World,
     player: kb_core::Player,
     mobs: mobs::Mobs,
     /// Здоровье 0..=20; смерть — респавн на точке старта.
     pub hp: i8,
-    /// Выбранный слот хотбара (для подсветки в HUD).
-    pub hotbar_sel: u32,
+    /// Инвентарь и выбранный слот (заполняется добычей).
+    inventory: Inventory,
+    pub sel_slot: usize,
+    /// Текущая цель копания и накопленный прогресс, секунд.
+    mining: Option<([i32; 3], f32)>,
     spawn: [f32; 3],
     pub mode: Mode,
     pub camera: Camera,
@@ -435,6 +476,30 @@ impl Gfx {
                 },
                 wgpu::util::TextureDataOrder::LayerMajor,
                 &ui_px,
+            )
+            .create_view(&Default::default());
+
+        // Иконки блоков (изо-кубики) — texture array, слой = id блока.
+        let (iw, ih, icon_px) = icon::render();
+        let icons = device
+            .create_texture_with_data(
+                &queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("ui.icons"),
+                    size: wgpu::Extent3d {
+                        width: iw,
+                        height: ih,
+                        depth_or_array_layers: kb_core::Block::COUNT as u32,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &icon_px,
             )
             .create_view(&Default::default());
 
@@ -754,6 +819,17 @@ impl Gfx {
                     },
                     count: None,
                 },
+                // Иконки блоков для хотбара (изо-кубики).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -783,7 +859,7 @@ impl Gfx {
         });
 
         let offscreen = Offscreen::new(
-            &device, size, PIXEL_SCALE, &blit_layout, &nearest, &hud_buf, &atlas, &ui_tex,
+            &device, size, PIXEL_SCALE, &blit_layout, &nearest, &hud_buf, &atlas, &ui_tex, &icons,
         );
 
         // Спавн — на поверхности в начале координат.
@@ -828,11 +904,14 @@ impl Gfx {
             hud_buf,
             atlas,
             ui_tex,
+            icons,
             world: world::World::new(SEED),
             player: kb_core::Player::new(spawn),
             mobs: mobs::Mobs::new(),
             hp: MAX_HP,
-            hotbar_sel: 0,
+            inventory: Inventory::default(),
+            sel_slot: 0,
+            mining: None,
             spawn,
             mode: Mode::Walk,
             camera,
@@ -941,6 +1020,7 @@ impl Gfx {
             &self.hud_buf,
             &self.atlas,
             &self.ui_tex,
+            &self.icons,
         );
     }
 
@@ -1002,30 +1082,57 @@ impl Gfx {
     /// Клик по миру: `place == None` — сломать блок под прицелом,
     /// `Some(b)` — поставить к его грани. Установка в собственный AABB
     /// запрещена — нельзя замуроваться.
-    pub fn interact(&mut self, place: Option<kb_core::Block>) {
+    /// Блок, в который целится игрок (для добычи/установки).
+    fn target(&mut self) -> Option<([i32; 3], [i32; 3])> {
         let world = &mut self.world;
-        let ray = kb_core::raycast(self.camera.pos, self.camera.dir(), REACH, |x, y, z| {
+        kb_core::raycast(self.camera.pos, self.camera.dir(), REACH, |x, y, z| {
             world.block([x, y, z]).solid()
-        });
-        let Some((hit, prev)) = ray else { return };
-        match place {
-            None => self.world.set_block(hit, kb_core::Block::Air),
-            Some(b) => {
-                let feet = self.player.pos;
-                let inside = |i: usize, p: i32| {
-                    let half = kb_core::PLAYER_WIDTH / 2.0 + 0.01;
-                    let (lo, hi) = match i {
-                        1 => (feet[1], feet[1] + kb_core::PLAYER_HEIGHT),
-                        _ => (feet[i] - half, feet[i] + half),
-                    };
-                    (p as f32) < hi && (p + 1) as f32 > lo
-                };
-                let overlaps_player = self.mode == Mode::Walk
-                    && (0..3).all(|i| inside(i, prev[i]));
-                if !overlaps_player {
-                    self.world.set_block(prev, b);
-                }
+        })
+    }
+
+    /// Копание (§7): удерживая ЛКМ, доводим блок до разрушения за время
+    /// его прочности; добытое падает в инвентарь. Возвращает прогресс 0..1
+    /// (для трещин в HUD). Смена цели или отпускание — сброс прогресса.
+    pub fn dig(&mut self, dt: f32, held: bool) -> f32 {
+        let Some((hit, _)) = self.target().filter(|_| held) else {
+            self.mining = None;
+            return 0.0;
+        };
+        let block = self.world.block(hit);
+        let progress = match self.mining {
+            Some((t, p)) if t == hit => p + dt,
+            _ => dt,
+        };
+        if progress >= block.break_time() {
+            if let Some(d) = block.drop() {
+                self.inventory.add(d);
             }
+            self.world.set_block(hit, kb_core::Block::Air);
+            self.mining = None;
+            return 0.0;
+        }
+        self.mining = Some((hit, progress));
+        progress / block.break_time().max(0.01)
+    }
+
+    /// Установка блока из выбранного слота (ПКМ). Тратит предмет; в свой
+    /// AABB не ставим (нельзя замуроваться).
+    pub fn place(&mut self) {
+        let Some((_, prev)) = self.target() else { return };
+        let feet = self.player.pos;
+        let inside = |i: usize, p: i32| {
+            let half = kb_core::PLAYER_WIDTH / 2.0 + 0.01;
+            let (lo, hi) = match i {
+                1 => (feet[1], feet[1] + kb_core::PLAYER_HEIGHT),
+                _ => (feet[i] - half, feet[i] + half),
+            };
+            (p as f32) < hi && (p + 1) as f32 > lo
+        };
+        if self.mode == Mode::Walk && (0..3).all(|i| inside(i, prev[i])) {
+            return; // перекрыли бы игрока
+        }
+        if let Some(b) = self.inventory.take(self.sel_slot) {
+            self.world.set_block(prev, b);
         }
     }
 
@@ -1059,6 +1166,7 @@ impl Gfx {
             &self.hud_buf,
             &self.atlas,
             &self.ui_tex,
+            &self.icons,
         );
     }
 
@@ -1115,8 +1223,15 @@ impl Gfx {
             self.pixel_scale as f32,
             self.dither as u32 as f32,
         ];
-        let hud =
-            HudUniform::new(&kb_materials::HUD, self.hp, MAX_HP, self.hotbar_sel, self.gui_scale, menu);
+        let hud = HudUniform::new(
+            &kb_materials::HUD,
+            self.hp,
+            MAX_HP,
+            self.sel_slot as u32,
+            self.gui_scale,
+            menu,
+            &self.inventory,
+        );
         self.queue.write_buffer(&self.hud_buf, 0, bytemuck::bytes_of(&hud));
 
         use wgpu::CurrentSurfaceTexture as Cst;

@@ -70,6 +70,30 @@ impl Block {
             _ => 0,
         }
     }
+
+    /// Время добычи блока вручную, секунд (§7: прочность). Воздух не копается.
+    #[inline]
+    pub const fn break_time(self) -> f32 {
+        match self {
+            Block::Air => 0.0,
+            Block::Leaves => 0.25,
+            Block::Dirt | Block::Grass => 0.5,
+            Block::Lamp => 0.6,
+            Block::Wood => 0.9,
+            Block::Stone => 1.4,
+        }
+    }
+
+    /// Что падает при добыче (§7). Трава даёт землю; листва — ничего;
+    /// остальное — само себя.
+    #[inline]
+    pub const fn drop(self) -> Option<Block> {
+        match self {
+            Block::Air | Block::Leaves => None,
+            Block::Grass => Some(Block::Dirt),
+            other => Some(other),
+        }
+    }
 }
 
 /// Палитро-чанк. Инвариант: `data` хранит ровно `CHUNK_VOLUME` индексов

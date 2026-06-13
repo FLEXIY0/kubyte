@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use kb_render::{Gfx, HOTBAR};
+use kb_render::Gfx;
 use web_time::Instant;
 use winit::{
     application::ApplicationHandler,
@@ -84,6 +84,8 @@ struct App {
     selected: usize,
     /// Позиция курсора (для кликов по меню паузы).
     cursor: (f32, f32),
+    /// Зажата ли ЛКМ (копание удержанием).
+    digging: bool,
 }
 
 impl App {
@@ -205,7 +207,15 @@ impl ApplicationHandler<GfxReady> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x as f32, position.y as f32);
             }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
+            WindowEvent::MouseInput { state, button, .. } => {
+                let pressed = state == ElementState::Pressed;
+                // ЛКМ — копать (удержанием), ведём флаг для tick.
+                if button == MouseButton::Left {
+                    self.digging = pressed;
+                }
+                if !pressed {
+                    return;
+                }
                 // Меню открыто — клик идёт по меню, а не по миру.
                 if let Some(gfx) = &mut self.gfx {
                     if gfx.menu_open() {
@@ -216,19 +226,13 @@ impl ApplicationHandler<GfxReady> for App {
                         return;
                     }
                 }
-                // Первый клик захватывает мышь, дальше кликаем по миру.
+                // Первый клик захватывает мышь, дальше взаимодействуем.
                 if !self.grabbed {
                     return self.grab(true);
                 }
-                if let Some(gfx) = &mut self.gfx {
-                    match button {
-                        MouseButton::Left => gfx.interact(None),
-                        MouseButton::Right => {
-                            if let Some(block) = HOTBAR[self.selected] {
-                                gfx.interact(Some(block));
-                            }
-                        }
-                        _ => {}
+                if button == MouseButton::Right {
+                    if let Some(gfx) = &mut self.gfx {
+                        gfx.place(); // установить блок из выбранного слота
                     }
                 }
             }
@@ -239,10 +243,10 @@ impl ApplicationHandler<GfxReady> for App {
                     MouseScrollDelta::PixelDelta(p) => -(p.y as i32).signum(),
                 };
                 if step != 0 {
-                    let n = HOTBAR.len() as i32;
+                    let n = kb_render::SLOTS as i32;
                     self.selected = ((self.selected as i32 + step).rem_euclid(n)) as usize;
                     if let Some(gfx) = &mut self.gfx {
-                        gfx.hotbar_sel = self.selected as u32;
+                        gfx.sel_slot = self.selected;
                     }
                 }
             }
@@ -300,7 +304,7 @@ impl ApplicationHandler<GfxReady> for App {
                             _ => {}
                         }
                         if let Some(gfx) = &mut self.gfx {
-                            gfx.hotbar_sel = self.selected as u32;
+                            gfx.sel_slot = self.selected;
                         }
                     }
                     self.keys.set(code, key.state.is_pressed());
@@ -308,6 +312,7 @@ impl ApplicationHandler<GfxReady> for App {
             }
             WindowEvent::Focused(false) => {
                 self.keys = Keys::default(); // не «залипать» при потере фокуса
+                self.digging = false;
                 self.grab(false);
             }
             WindowEvent::RedrawRequested => {
@@ -322,6 +327,7 @@ impl ApplicationHandler<GfxReady> for App {
                 // Меню паузы замораживает симуляцию; рендер продолжается.
                 if !gfx.menu_open() {
                     gfx.tick(dt, self.keys.axes());
+                    gfx.dig(dt, self.digging && self.grabbed); // копание удержанием ЛКМ
                 }
                 gfx.render();
 
@@ -358,6 +364,7 @@ pub fn run() {
         last_frame: None,
         selected: 0,
         cursor: (0.0, 0.0),
+        digging: false,
     };
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -17,16 +17,14 @@ struct Hud {
     bar_border: vec4<f32>,
     bar_sel: vec4<f32>,
     menu: vec4<f32>,           // x — открыто, y — пункт, z — масштаб, w — дизеринг
+    slots: array<vec4<u32>, 9>,// .x — id блока (255 пусто), .y — количество
 };
 @group(0) @binding(2) var<uniform> hud: Hud;
 @group(0) @binding(3) var atlas: texture_2d_array<f32>;
-@group(0) @binding(4) var ui: texture_2d<f32>; // ярлыки меню
+@group(0) @binding(4) var ui: texture_2d<f32>;      // ярлыки меню
+@group(0) @binding(5) var icons: texture_2d_array<f32>; // изо-иконки блоков
 
 // Масштаб GUI берётся из hud.hp.w (настройка размера интерфейса).
-
-// Слои texture array для слотов хотбара; −1 — пустой слот.
-// ОБЯЗАН совпадать с kb_render::HOTBAR (см. lib.rs).
-const SLOT_LAYERS = array<i32, 9>(0, 1, 3, 4, 5, 6, -1, -1, -1);
 
 // Внутри ли (x,y) силуэта сердца / блика (битмаски из юниформа).
 fn heart_at(x: i32, y: i32) -> bool {
@@ -96,16 +94,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         if hb.x < 1.0 || hb.x >= 181.0 || hb.y < 1.0 || hb.y >= 21.0 {
             color = hud.bar_border.rgb;
         }
-        // Иконка блока: слот 20 GUI-px, икона 16×16 внутри.
+        // Изо-иконка блока из слота: слот 20 GUI-px, икона 16×16 внутри.
         let slot = i32(floor((hb.x - 1.0) / 20.0));
         let local = vec2(hb.x - 1.0 - f32(slot) * 20.0, hb.y) - vec2(2.0, 3.0);
         if slot >= 0 && slot < 9 && all(local >= vec2(0.0)) && all(local < vec2(16.0)) {
-            let layer = SLOT_LAYERS[slot];
-            if layer >= 0 {
-                // Иконка — вариант 0 (атлас хранит по 16 вариантов на материал).
-                let texel =
-                    textureSampleLevel(atlas, samp, (local + 0.5) / 16.0, u32(layer) * 16u, 0.0);
-                color = mix(color, texel.rgb, 1.0);
+            let id = hud.slots[slot].x; // id блока (255 = пусто)
+            if id != 255u && id != 0u {
+                let texel = textureSampleLevel(icons, samp, (local + 0.5) / 16.0, id, 0.0);
+                color = mix(color, texel.rgb, texel.a);
             }
         }
     }
