@@ -1,0 +1,27 @@
+[package]
+name = "kb-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Дев-инструмент авторинга дескрипторов (§12). В релизный клиент не входит:
+# egui/eframe/image — обоснованные зависимости ТОЛЬКО редактор-сборки.
+[dependencies]
+kb-materials.workspace = true
+kb-core.workspace = true
+# eframe = egui поверх wgpu (§12). default-features off — нам не нужны
+# accesskit/persistence; renderer задаём wgpu-фичей.
+# x11/wayland — бэкенды окна winit (default-features off их убрал);
+# wgpu — рендерер (§12); default_fonts — встроенный шрифт UI.
+# 0.31 — стабильный API (update/SidePanel); 0.34 в разгаре миграции
+# на новый Panel/ui и тащит deprecation-предупреждения (а CI = -D warnings).
+eframe = { version = "0.31", default-features = false, features = [
+    "wgpu",
+    "default_fonts",
+    "x11",
+    "wayland",
+] }
+egui = "0.31"
+# Загрузка референсов для АНАЛИЗА (не для встраивания): из картинки
+# снимаются только числа дескриптора, сам файл никуда не сохраняется.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }

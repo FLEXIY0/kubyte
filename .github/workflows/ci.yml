@@ -34,20 +34,27 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact: kb-linux-x86_64
-            path: target/release/kb
+            game: target/release/kb
+            editor: target/release/kb-editor
           - os: windows-latest
             artifact: kb-windows-x86_64
-            path: target/release/kb.exe
+            game: target/release/kb.exe
+            editor: target/release/kb-editor.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p kb
+      # Игра и редактор материалов (§12, дев-инструмент) — оба бинарника.
+      - run: cargo build --release -p kb -p kb-editor
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.path }}
+          path: ${{ matrix.game }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-editor
+          path: ${{ matrix.editor }}
 
   web:
     runs-on: ubuntu-latest

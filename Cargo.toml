@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "materials", "worldgen", "render", "platform"]
+members = ["core", "materials", "worldgen", "render", "platform", "editor"]
 
 [workspace.package]
 version = "0.0.1"

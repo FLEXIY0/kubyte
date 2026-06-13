@@ -37,6 +37,10 @@ pub struct Descriptor {
     /// Амплитуда вариации яркости, в 1/256 долях. Инвариант грамматики
     /// «блок читается глазом» (§5): не более 38 (≈ ±15%).
     pub variation: u8,
+    /// Разброс тона между вариантами блока (§5): насколько сильно
+    /// 16 вариантов отличаются общей яркостью. 0 — все одинаковы,
+    /// 16 — «контролируемый хаос» по умолчанию, выше — разнобой заметнее.
+    pub spread: u8,
     /// Оверлей поверх базового шума (§5).
     pub overlay: Overlay,
 }
@@ -66,6 +70,7 @@ pub const STONE: Descriptor = Descriptor {
     palette: [[113, 113, 113], [119, 119, 119], [127, 127, 127], [142, 142, 142]],
     cell_log2: 1,
     variation: 16,
+    spread: 14,
     overlay: Overlay::None,
 };
 
@@ -74,6 +79,7 @@ pub const DIRT: Descriptor = Descriptor {
     palette: [[104, 72, 49], [121, 85, 58], [142, 103, 72], [169, 124, 88]],
     cell_log2: 0,
     variation: 38,
+    spread: 18,
     overlay: Overlay::Speckle { color: [88, 58, 40], chance: 35 },
 };
 
@@ -83,6 +89,7 @@ pub const GRASS_TOP: Descriptor = Descriptor {
     palette: [[94, 158, 52], [106, 169, 64], [120, 180, 76], [149, 198, 102]],
     cell_log2: 0,
     variation: 32,
+    spread: 16,
     overlay: Overlay::Speckle { color: [86, 146, 48], chance: 12 },
 };
 
@@ -92,6 +99,7 @@ pub const GRASS_SIDE: Descriptor = Descriptor {
     palette: DIRT.palette,
     cell_log2: 0,
     variation: 36,
+    spread: 16,
     overlay: Overlay::TopBand {
         palette: [[100, 162, 58], [122, 181, 78]],
         min_depth: 2,
@@ -104,6 +112,7 @@ pub const WOOD: Descriptor = Descriptor {
     palette: [[61, 48, 29], [92, 74, 45], [110, 88, 54], [145, 115, 70]],
     cell_log2: 2,
     variation: 28,
+    spread: 12,
     overlay: Overlay::Stripes { color: [52, 40, 25], period: 3 },
 };
 
@@ -113,6 +122,7 @@ pub const LEAVES: Descriptor = Descriptor {
     palette: [[20, 50, 18], [38, 96, 30], [56, 150, 42], [78, 198, 54]],
     cell_log2: 0,
     variation: 38,
+    spread: 22,
     overlay: Overlay::Speckle { color: [10, 26, 10], chance: 96 },
 };
 
@@ -121,6 +131,7 @@ pub const LAMP: Descriptor = Descriptor {
     palette: [[196, 134, 56], [216, 156, 66], [232, 176, 80], [244, 196, 100]],
     cell_log2: 1,
     variation: 20,
+    spread: 10,
     overlay: Overlay::Speckle { color: [255, 222, 150], chance: 70 },
 };
 
@@ -130,6 +141,7 @@ pub const PIG: Descriptor = Descriptor {
     palette: [[196, 124, 124], [212, 140, 138], [226, 154, 150], [238, 170, 164]],
     cell_log2: 2,
     variation: 16,
+    spread: 12,
     overlay: Overlay::Speckle { color: [178, 108, 110], chance: 24 },
 };
 
@@ -138,6 +150,7 @@ pub const ZOMBIE: Descriptor = Descriptor {
     palette: [[58, 84, 58], [66, 96, 64], [76, 108, 72], [86, 118, 80]],
     cell_log2: 1,
     variation: 30,
+    spread: 14,
     overlay: Overlay::Speckle { color: [44, 62, 46], chance: 60 },
 };
 
@@ -209,7 +222,7 @@ pub fn bake(desc: &Descriptor, seed: u64) -> [u8; TEX_BYTES] {
     let mut out = [0u8; TEX_BYTES];
     // Тон варианта: лёгкий общий сдвиг яркости ±5% — варианты блока
     // различимы и в упор, и силуэтом издалека, оставаясь «той же сутью».
-    let tone = (hash2(seed, -1, -1) & 31) as i32 - 16;
+    let tone = ((hash2(seed, -1, -1) & 0xFF) as i32 - 128) * desc.spread as i32 / 128;
     for y in 0..TEX_SIZE as u32 {
         for x in 0..TEX_SIZE as u32 {
             let structure = value_noise(seed, x, y, desc.cell_log2);
@@ -270,7 +283,7 @@ mod tests {
 
     /// Зафиксированный хеш эталонной текстуры. Меняется только вместе
     /// с версией генератора (§4).
-    // Обновлён вместе со статистической подгонкой палитр под стиль эпохи.
+    // Обновлён вместе с полем spread (разброс тона вариантов §5).
     // До альфы-релиза менять эталон законно.
-    const GOLDEN_STONE_42: u64 = 13897442884624141987;
+    const GOLDEN_STONE_42: u64 = 12642292647876812355;
 }
