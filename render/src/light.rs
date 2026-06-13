@@ -45,7 +45,9 @@ impl Light {
         for z in -PAD..(CHUNK_Z as i32 + PAD) {
             for x in -PAD..(CHUNK_X as i32 + PAD) {
                 for y in (0..CHUNK_Y as i32).rev() {
-                    if get([x, y, z]).solid() {
+                    // Свет проходит сквозь прозрачные блоки (листву), иначе
+                    // грани за листвой и сама листва были бы чёрными.
+                    if get([x, y, z]).occludes() {
                         break;
                     }
                     sky[idx(x, y, z)] = 15;
@@ -93,7 +95,7 @@ fn flood(field: &mut [u8], mut queue: VecDeque<([i32; 3], u8)>, get: &impl Fn([i
             let inside = (-PAD..CHUNK_X as i32 + PAD).contains(&nx)
                 && (0..CHUNK_Y as i32).contains(&ny)
                 && (-PAD..CHUNK_Z as i32 + PAD).contains(&nz);
-            if inside && field[idx(nx, ny, nz)] < next && !get([nx, ny, nz]).solid() {
+            if inside && field[idx(nx, ny, nz)] < next && !get([nx, ny, nz]).occludes() {
                 field[idx(nx, ny, nz)] = next;
                 queue.push_back(([nx, ny, nz], next));
             }

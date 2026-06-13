@@ -91,11 +91,18 @@ impl App {
     /// (macOS). В браузере законен только из обработчика клика.
     fn grab(&mut self, on: bool) {
         let Some(w) = &self.window else { return };
-        let mode = if on { CursorGrabMode::Locked } else { CursorGrabMode::None };
-        self.grabbed = on
-            && w.set_cursor_grab(mode)
+        // ВАЖНО: при on=false set_cursor_grab всё равно должен вызваться,
+        // иначе курсор остаётся захваченным (был баг — `&&` коротко
+        // замыкался и release не выполнялся, мышь «не работала» в меню).
+        let ok = if on {
+            w.set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|_| w.set_cursor_grab(CursorGrabMode::Confined))
-                .is_ok();
+                .is_ok()
+        } else {
+            w.set_cursor_grab(CursorGrabMode::None).ok();
+            false
+        };
+        self.grabbed = on && ok;
         w.set_cursor_visible(!self.grabbed);
     }
 

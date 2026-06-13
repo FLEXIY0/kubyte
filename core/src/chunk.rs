@@ -54,6 +54,14 @@ impl Block {
         !matches!(self, Block::Air)
     }
 
+    /// Загораживает ли блок соседнюю грань. Лист — твёрдый (по нему ходят,
+    /// он рубится), но НЕ загораживает: сквозь дырки кроны видно соседнюю
+    /// листву и ствол, а не пустоту (§5, дырявые блоки).
+    #[inline]
+    pub const fn occludes(self) -> bool {
+        self.solid() && !matches!(self, Block::Leaves)
+    }
+
     /// Сила собственного света 0..=15 (blocklight, §6).
     #[inline]
     pub const fn emission(self) -> u8 {

@@ -22,8 +22,7 @@ struct Hud {
 @group(0) @binding(3) var atlas: texture_2d_array<f32>;
 @group(0) @binding(4) var ui: texture_2d<f32>; // ярлыки меню
 
-// Масштаб GUI: 1 GUI-пиксель = 2 экранных (дефолт эпохи).
-const GUI: f32 = 2.0;
+// Масштаб GUI берётся из hud.hp.w (настройка размера интерфейса).
 
 // Слои texture array для слотов хотбара; −1 — пустой слот.
 // ОБЯЗАН совпадать с kb_render::HOTBAR (см. lib.rs).
@@ -78,8 +77,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Экран в GUI-пикселях; размер восстановлен из производных uv.
     let res = 1.0 / vec2(dpdx(in.uv.x), dpdy(in.uv.y));
-    let g = in.uv * res / GUI;
-    let size = res / GUI;
+    let gui = hud.hp.w; // размер интерфейса (настройка)
+    let g = in.uv * res / gui;
+    let size = res / gui;
     let x0 = size.x / 2.0 - 91.0; // левый край хотбара (как в оригинале)
 
     // Прицел: крестик в центре, инверсия читается на любом фоне.
@@ -150,29 +150,36 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if hud.menu.x > 0.5 {
         color *= 0.35; // затемняем мир
         let pw = 160.0;
-        let ph = 88.0;
+        let ph = 106.0;
         let m = vec2(g.x - (size.x / 2.0 - pw / 2.0), g.y - (size.y / 2.0 - ph / 2.0));
         if all(m >= vec2(0.0)) && all(m < vec2(pw, ph)) {
             color = mix(color, vec3(0.07, 0.08, 0.10), 0.88);
             if m.x < 1.0 || m.x >= pw - 1.0 || m.y < 1.0 || m.y >= ph - 1.0 {
                 color = vec3(0.55);
             }
-            // Четыре строки по 18 px: PIXELS / DITHER / EDITOR / RESUME.
+            // Пять строк по 18 px: GUI / PIXELS / DITHER / EDITOR / RESUME.
             let row = floor((m.y - 8.0) / 18.0);
             let inrow = m.y - 8.0 - row * 18.0;
-            if row >= 0.0 && row < 4.0 && inrow >= 0.0 && inrow < 16.0 {
+            if row >= 0.0 && row < 5.0 && inrow >= 0.0 && inrow < 16.0 {
                 if row == hud.menu.y {
                     color = mix(color, vec3(0.20, 0.28, 0.40), 0.6); // подсветка
                 }
                 let lx = m.x - 96.0; // колонка управления справа
+                let pip = floor(lx / 12.0);
+                let inpip = lx - pip * 12.0;
                 if row == 0.0 {
-                    // Масштаб пикселей: 4 пипса, залитые = текущий.
-                    let pip = floor(lx / 12.0);
+                    // Размер интерфейса: 4 пипса (2..5), залит = gui-1.
                     if pip >= 0.0 && pip < 4.0 && inrow >= 4.0 && inrow < 12.0
-                        && (lx - pip * 12.0) >= 0.0 && (lx - pip * 12.0) < 8.0 {
-                        color = select(vec3(0.25), vec3(0.85), pip < hud.menu.z);
+                        && inpip >= 0.0 && inpip < 8.0 {
+                        color = select(vec3(0.25), vec3(0.85), pip < gui - 1.0);
                     }
                 } else if row == 1.0 {
+                    // Масштаб пикселей: 4 пипса, залитые = текущий.
+                    if pip >= 0.0 && pip < 4.0 && inrow >= 4.0 && inrow < 12.0
+                        && inpip >= 0.0 && inpip < 8.0 {
+                        color = select(vec3(0.25), vec3(0.85), pip < hud.menu.z);
+                    }
+                } else if row == 2.0 {
                     // Дизеринг: квадрат-индикатор (зелёный вкл / серый выкл).
                     if lx >= 0.0 && lx < 12.0 && inrow >= 3.0 && inrow < 13.0 {
                         color = select(vec3(0.30), vec3(0.35, 0.80, 0.40), hud.menu.w > 0.5);

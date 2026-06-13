@@ -56,7 +56,14 @@ fn srgb3(c: [u8; 3]) -> [f32; 4] {
 }
 
 impl HudUniform {
-    fn new(style: &kb_materials::HudStyle, hp: i8, max_hp: i8, sel: u32, menu: [f32; 4]) -> Self {
+    fn new(
+        style: &kb_materials::HudStyle,
+        hp: i8,
+        max_hp: i8,
+        sel: u32,
+        gui: u32,
+        menu: [f32; 4],
+    ) -> Self {
         let mut rows = [[0u32; 4]; 9];
         for (i, r) in rows.iter_mut().enumerate() {
             r[0] = style.heart[i] as u32;
@@ -65,7 +72,7 @@ impl HudUniform {
         let mut bar_bg = srgb3([style.bar_bg[0], style.bar_bg[1], style.bar_bg[2]]);
         bar_bg[3] = style.bar_bg[3] as f32 / 255.0; // сила наложения подложки
         Self {
-            hp: [hp as f32, max_hp as f32, sel as f32, 0.0],
+            hp: [hp as f32, max_hp as f32, sel as f32, gui as f32],
             rows,
             full: srgb3(style.full),
             empty: srgb3(style.empty),
@@ -286,14 +293,14 @@ pub enum MenuAction {
 
 /// Размеры панели меню в GUI-пикселях (общие для блита и хит-теста).
 const MENU_W: f32 = 160.0;
-const MENU_H: f32 = 88.0;
-const MENU_ROWS: u32 = 4;
+const MENU_H: f32 = 106.0;
+const MENU_ROWS: u32 = 5;
 
 /// Печёт текстуру ярлыков меню (прозрачная, белый текст) под панель.
 fn bake_menu_labels() -> (u32, u32, Vec<u8>) {
     let (w, h) = (MENU_W as usize, MENU_H as usize);
     let mut buf = vec![0u8; w * h * 4];
-    for (r, label) in ["PIXELS", "DITHER", "EDITOR", "RESUME"].iter().enumerate() {
+    for (r, label) in ["GUI", "PIXELS", "DITHER", "EDITOR", "RESUME"].iter().enumerate() {
         font::draw_text(&mut buf, w, 8, 8 + r * 18 + 3, label);
     }
     (w as u32, h as u32, buf)
@@ -337,10 +344,11 @@ pub struct Gfx {
     /// Игровое время суток, секунд. Стартуем утром.
     time: f32,
     /// Настройки и меню паузы (§6).
+    gui_scale: u32, // размер интерфейса (1 GUI-px = gui_scale экранных)
     pixel_scale: u32,
     dither: bool,
     menu_open: bool,
-    menu_sel: u32, // 0 — масштаб пикселей, 1 — дизеринг
+    menu_sel: u32, // 0 GUI, 1 пиксели, 2 дизеринг, 3 редактор, 4 выход
 }
 
 impl Gfx {
@@ -793,6 +801,8 @@ impl Gfx {
             pitch: look("KB_PITCH", -0.1),
         };
 
+        // Стартовый размер интерфейса — по высоте экрана (до move config).
+        let gui_scale = (config.height / 240).clamp(2, 5);
         Ok(Self {
             surface,
             device,
@@ -834,6 +844,7 @@ impl Gfx {
                 .unwrap_or(DAY_SECONDS * 0.1),
             #[cfg(target_arch = "wasm32")]
             time: DAY_SECONDS * 0.1,
+            gui_scale,
             pixel_scale: PIXEL_SCALE,
             dither: true,
             #[cfg(not(target_arch = "wasm32"))]
@@ -862,18 +873,23 @@ impl Gfx {
     }
 
     /// Активация/изменение текущего пункта. Возвращает действие платформе.
+    /// Пункты: 0 GUI, 1 пиксели, 2 дизеринг, 3 редактор, 4 выход.
     pub fn menu_activate(&mut self, delta: i32) -> MenuAction {
         match self.menu_sel {
             0 => {
+                self.gui_scale = (self.gui_scale as i32 + delta).clamp(2, 5) as u32;
+                MenuAction::None
+            }
+            1 => {
                 self.pixel_scale = (self.pixel_scale as i32 + delta).clamp(1, 4) as u32;
                 self.remake_offscreen();
                 MenuAction::None
             }
-            1 => {
+            2 => {
                 self.dither = !self.dither;
                 MenuAction::None
             }
-            2 => MenuAction::OpenEditor,
+            3 => MenuAction::OpenEditor,
             _ => {
                 self.menu_open = false;
                 MenuAction::Close
@@ -887,10 +903,10 @@ impl Gfx {
 
     /// Клик мышью по меню: физические координаты курсора → строка → действие.
     pub fn menu_click(&mut self, phys_x: f32, phys_y: f32) -> MenuAction {
-        const GUI: f32 = 2.0;
-        let (sw, sh) = (self.config.width as f32 / GUI, self.config.height as f32 / GUI);
-        let mx = phys_x / GUI - (sw / 2.0 - MENU_W / 2.0);
-        let my = phys_y / GUI - (sh / 2.0 - MENU_H / 2.0);
+        let gui = self.gui_scale as f32;
+        let (sw, sh) = (self.config.width as f32 / gui, self.config.height as f32 / gui);
+        let mx = phys_x / gui - (sw / 2.0 - MENU_W / 2.0);
+        let my = phys_y / gui - (sh / 2.0 - MENU_H / 2.0);
         if !(0.0..MENU_W).contains(&mx) || my < 8.0 {
             return MenuAction::None;
         }
@@ -899,10 +915,14 @@ impl Gfx {
             return MenuAction::None;
         }
         self.menu_sel = row as u32;
-        // Для масштаба — клик по конкретному пипсу ставит значение.
-        if row == 0 {
-            let lx = mx - 96.0;
-            if (0.0..48.0).contains(&lx) {
+        // Клик по конкретному пипсу сразу ставит значение.
+        let lx = mx - 96.0;
+        if (0.0..48.0).contains(&lx) {
+            if row == 0 {
+                self.gui_scale = (lx / 12.0) as u32 + 2;
+                return MenuAction::None;
+            }
+            if row == 1 {
                 self.pixel_scale = (lx / 12.0) as u32 + 1;
                 self.remake_offscreen();
                 return MenuAction::None;
@@ -1095,7 +1115,8 @@ impl Gfx {
             self.pixel_scale as f32,
             self.dither as u32 as f32,
         ];
-        let hud = HudUniform::new(&kb_materials::HUD, self.hp, MAX_HP, self.hotbar_sel, menu);
+        let hud =
+            HudUniform::new(&kb_materials::HUD, self.hp, MAX_HP, self.hotbar_sel, self.gui_scale, menu);
         self.queue.write_buffer(&self.hud_buf, 0, bytemuck::bytes_of(&hud));
 
         use wgpu::CurrentSurfaceTexture as Cst;

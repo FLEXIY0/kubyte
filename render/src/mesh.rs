@@ -71,10 +71,15 @@ pub fn build(chunk: &Chunk, neighbors: &Neighbors) -> Vec<u32> {
                     let (s, b) = light.at(p[0], p[1], p[2]);
                     s | b << 4
                 };
-                *cell = match (ba.solid(), bb.solid()) {
-                    (true, false) => Some((ba, true, lum(b))),  // нормаль +d
-                    (false, true) => Some((bb, false, lum(a))), // нормаль −d
-                    _ => None,
+                // Грань рисуется, если блок твёрдый, а сосед его НЕ
+                // загораживает (воздух или лист): лист рядом с листом и
+                // ствол за листвой остаются видны сквозь дырки.
+                *cell = if ba.solid() && !bb.occludes() {
+                    Some((ba, true, lum(b))) // нормаль +d
+                } else if bb.solid() && !ba.occludes() {
+                    Some((bb, false, lum(a))) // нормаль −d
+                } else {
+                    None
                 };
             }
 
