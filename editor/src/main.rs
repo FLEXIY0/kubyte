@@ -53,6 +53,16 @@ struct Editor {
     brush: u8,
     /// Референс из KB_REF, ждущий первого кадра (нужен ctx для текстуры).
     pending: Option<String>,
+    /// История для отмены (Ctrl+Z): состояние блока ДО серии правок.
+    undo_stack: Vec<(usize, Descriptor)>,
+    /// Снимок начала текущей серии правок; коммитится в стек, когда
+    /// взаимодействие улеглось — так непрерывная правка = один шаг отмены.
+    undo_pending: Option<(usize, Descriptor)>,
+    /// «Точка возврата» — состояние, которое игрок установил (референс или
+    /// выбор блока); кнопка сброса возвращает сюда.
+    baseline: Descriptor,
+    /// Растущий сид перетасовки — каждый клик даёт новую раскладку.
+    shuffle_seed: u64,
 }
 
 impl Editor {
@@ -83,6 +93,47 @@ impl Editor {
             brush: AUTO,
             // KB_REF — отладочная автозагрузка референса на старте.
             pending: std::env::var("KB_REF").ok(),
+            undo_stack: Vec::new(),
+            undo_pending: None,
+            baseline: kb_materials::STONE,
+            shuffle_seed: 0,
+        }
+    }
+
+    /// Перетасовка паттерна: обмен соседних ячеек. Множество цветов и
+    /// дырок сохраняется (структура остаётся), но раскладка иная — это
+    /// «чуть перемешать», а не превратить в шум.
+    fn shuffle(&mut self) {
+        self.shuffle_seed = self.shuffle_seed.wrapping_add(1);
+        let mut s = kb_core::splitmix64(self.shuffle_seed);
+        let mut rng = || {
+            s = kb_core::splitmix64(s);
+            s
+        };
+        let pat = &mut self.blocks[self.sel].desc.pattern;
+        for _ in 0..96 {
+            let i = (rng() % 256) as usize;
+            let (x, y) = (i % TEX_SIZE, i / TEX_SIZE);
+            let (nx, ny) = match rng() % 4 {
+                0 => (x + 1, y),
+                1 => (x.wrapping_sub(1), y),
+                2 => (x, y + 1),
+                _ => (x, y.wrapping_sub(1)),
+            };
+            if nx < TEX_SIZE && ny < TEX_SIZE {
+                pat.swap(i, ny * TEX_SIZE + nx);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Отмена: возвращает блок к состоянию до последней серии правок.
+    fn undo(&mut self) {
+        if let Some((idx, desc)) = self.undo_stack.pop() {
+            self.sel = idx;
+            self.blocks[idx].desc = desc;
+            self.undo_pending = None;
+            self.dirty = true;
         }
     }
 
@@ -112,7 +163,9 @@ impl Editor {
                     16,
                     image::imageops::FilterType::Triangle,
                 );
-                self.blocks[self.sel].desc = analyze(&small);
+                let desc = analyze(&small);
+                self.blocks[self.sel].desc = desc;
+                self.baseline = desc; // референс становится точкой возврата
                 // Превью референса — апскейл его же 16×16, чтобы видеть источник.
                 let mut rgba = Vec::with_capacity(16 * 16 * 4);
                 for p in small.pixels() {
@@ -146,14 +199,41 @@ impl eframe::App for Editor {
             self.try_load(ctx, &p);
         }
 
+        // Отмена до съёма «before», чтобы её правка не попала в историю.
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
+            self.undo();
+        }
+
         if self.dirty {
             self.rebuild(ctx);
             self.dirty = false;
         }
 
+        // Снимок состояния на входе в кадр — для коалесинга истории.
+        let before = (self.sel, self.blocks[self.sel].desc);
+
         self.left_panel(ctx);
         self.bottom_panel(ctx);
         self.central_panel(ctx);
+
+        // Коалесинг: непрерывная правка (перетаскивание слайдера/мазок по
+        // холсту) — это много кадров с изменениями, но один шаг отмены.
+        // Снимок начала серии запоминаем один раз; коммитим, когда правки
+        // прекратились и мышь отпущена.
+        let changed = before.0 == self.sel && before.1 != self.blocks[self.sel].desc;
+        if changed && self.undo_pending.is_none() {
+            self.undo_pending = Some(before);
+        }
+        let interacting = ctx.input(|i| i.pointer.any_down());
+        if !changed && !interacting {
+            if let Some(p) = self.undo_pending.take() {
+                self.undo_stack.push(p);
+                // История не бесконечна: держим последние 100 шагов.
+                if self.undo_stack.len() > 100 {
+                    self.undo_stack.remove(0);
+                }
+            }
+        }
     }
 }
 
@@ -167,6 +247,8 @@ impl Editor {
                     .clicked()
                 {
                     self.sel = i;
+                    // Точка возврата — состояние блока на момент выбора.
+                    self.baseline = self.blocks[i].desc;
                     self.dirty = true;
                 }
             }
@@ -313,10 +395,27 @@ impl Editor {
                 }
             }
         }
-        if ui.button("весь холст → шум").clicked() {
-            self.blocks[self.sel].desc.pattern = AUTO_PATTERN;
-            self.dirty = true;
-        }
+        ui.horizontal(|ui| {
+            if ui.button("⟲ перетасовать").clicked() {
+                self.shuffle();
+            }
+            if ui.button("↺ сброс к референсу").clicked() {
+                self.blocks[self.sel].desc = self.baseline;
+                self.dirty = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("весь холст → шум").clicked() {
+                self.blocks[self.sel].desc.pattern = AUTO_PATTERN;
+                self.dirty = true;
+            }
+            if ui
+                .add_enabled(!self.undo_stack.is_empty(), egui::Button::new("⮌ отмена (Ctrl+Z)"))
+                .clicked()
+            {
+                self.undo();
+            }
+        });
     }
 
     fn preview(&self, ui: &mut egui::Ui) {
