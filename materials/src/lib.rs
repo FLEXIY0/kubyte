@@ -26,6 +26,20 @@ pub const fn variant_seed(layer: usize, variant: usize) -> u64 {
     kb_core::splitmix64(((layer as u64) << 8) | variant as u64)
 }
 
+/// Значения ячейки паттерна-рисунка (§5):
+/// 0..=3 — фиксированный индекс палитры (структура из референса/рисовки),
+/// AUTO — процедурный шум (поведение по умолчанию),
+/// TRANSPARENT — прозрачный пиксель (дырки листвы, стекло).
+pub const AUTO: u8 = 4;
+pub const TRANSPARENT: u8 = 5;
+
+/// 16×16 индексов палитры (§5: «битмап-паттерн как массив индексов»).
+pub type Pattern = [u8; TEX_SIZE * TEX_SIZE];
+
+/// Паттерн «всё процедурно» — дефолт для блоков без рисунка.
+/// Блок с ним печётся бит-в-бит как до появления паттернов.
+pub const AUTO_PATTERN: Pattern = [AUTO; TEX_SIZE * TEX_SIZE];
+
 /// Дескриптор материала. Это *данные*, а не код (§1): новый материал —
 /// новая константа в таблице, генератор один на всех.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +57,10 @@ pub struct Descriptor {
     pub spread: u8,
     /// Оверлей поверх базового шума (§5).
     pub overlay: Overlay,
+    /// Паттерн-рисунок 16×16 (§5): где AUTO — генератор кладёт шум, где
+    /// 0..3 — фиксированный цвет (структура), где TRANSPARENT — дырка.
+    /// Так блок становится «ближе к исходнику», а не чистым шумом.
+    pub pattern: Pattern,
 }
 
 /// Оверлеи — те самые «полосы и крапинки» из §5: маленький закрытый
@@ -72,6 +90,7 @@ pub const STONE: Descriptor = Descriptor {
     variation: 16,
     spread: 14,
     overlay: Overlay::None,
+    pattern: AUTO_PATTERN,
 };
 
 pub const DIRT: Descriptor = Descriptor {
@@ -81,6 +100,7 @@ pub const DIRT: Descriptor = Descriptor {
     variation: 38,
     spread: 18,
     overlay: Overlay::Speckle { color: [88, 58, 40], chance: 35 },
+    pattern: AUTO_PATTERN,
 };
 
 pub const GRASS_TOP: Descriptor = Descriptor {
@@ -91,6 +111,7 @@ pub const GRASS_TOP: Descriptor = Descriptor {
     variation: 32,
     spread: 16,
     overlay: Overlay::Speckle { color: [86, 146, 48], chance: 12 },
+    pattern: AUTO_PATTERN,
 };
 
 pub const GRASS_SIDE: Descriptor = Descriptor {
@@ -105,6 +126,7 @@ pub const GRASS_SIDE: Descriptor = Descriptor {
         min_depth: 2,
         max_depth: 4,
     },
+    pattern: AUTO_PATTERN,
 };
 
 pub const WOOD: Descriptor = Descriptor {
@@ -114,6 +136,7 @@ pub const WOOD: Descriptor = Descriptor {
     variation: 28,
     spread: 12,
     overlay: Overlay::Stripes { color: [52, 40, 25], period: 3 },
+    pattern: AUTO_PATTERN,
 };
 
 pub const LEAVES: Descriptor = Descriptor {
@@ -124,6 +147,7 @@ pub const LEAVES: Descriptor = Descriptor {
     variation: 38,
     spread: 22,
     overlay: Overlay::Speckle { color: [10, 26, 10], chance: 96 },
+    pattern: AUTO_PATTERN,
 };
 
 pub const LAMP: Descriptor = Descriptor {
@@ -133,6 +157,7 @@ pub const LAMP: Descriptor = Descriptor {
     variation: 20,
     spread: 10,
     overlay: Overlay::Speckle { color: [255, 222, 150], chance: 70 },
+    pattern: AUTO_PATTERN,
 };
 
 /// «Кожа» мобов — те же дескрипторы, что у блоков (§1: один генератор
@@ -143,6 +168,7 @@ pub const PIG: Descriptor = Descriptor {
     variation: 16,
     spread: 12,
     overlay: Overlay::Speckle { color: [178, 108, 110], chance: 24 },
+    pattern: AUTO_PATTERN,
 };
 
 pub const ZOMBIE: Descriptor = Descriptor {
@@ -152,6 +178,7 @@ pub const ZOMBIE: Descriptor = Descriptor {
     variation: 30,
     spread: 14,
     overlay: Overlay::Speckle { color: [44, 62, 46], chance: 60 },
+    pattern: AUTO_PATTERN,
 };
 
 /// Таблица текстур (§1: данные вместо кода). Индекс = слой texture array.
@@ -225,39 +252,53 @@ pub fn bake(desc: &Descriptor, seed: u64) -> [u8; TEX_BYTES] {
     let tone = ((hash2(seed, -1, -1) & 0xFF) as i32 - 128) * desc.spread as i32 / 128;
     for y in 0..TEX_SIZE as u32 {
         for x in 0..TEX_SIZE as u32 {
-            let structure = value_noise(seed, x, y, desc.cell_log2);
-            let mut color = desc.palette[(structure as usize).clamp(0, 255) * 4 / 256];
-
-            match desc.overlay {
-                Overlay::None => {}
-                // Кластеры 2×2: один бросок на ячейку — крапинка читается
-                // как объект, а не как шум-«песок».
-                Overlay::Speckle { color: c, chance } => {
-                    if hash2(seed ^ 0xC3, (x / 2) as i32, (y / 2) as i32) & 0xFF < chance as u32 {
-                        color = c;
-                    }
-                }
-                // Полоса каждые `period` столбцов, с дрожанием положения.
-                Overlay::Stripes { color: c, period } => {
-                    let jitter = hash2(seed ^ 0x51, (x / period as u32) as i32, 0) & 1;
-                    if x % period as u32 == jitter {
-                        color = c;
-                    }
-                }
-                // Глубина кромки своя в каждом столбце → рваный край.
-                Overlay::TopBand { palette, min_depth, max_depth } => {
-                    let depth = min_depth as u32
-                        + hash2(seed ^ 0x77, x as i32, 0) % (max_depth - min_depth + 1) as u32;
-                    if y < depth {
-                        color = palette[(hash2(seed ^ 0x77, x as i32, y as i32) & 1) as usize];
-                    }
-                }
+            let i = y as usize * TEX_SIZE + x as usize;
+            // Прозрачная ячейка паттерна: out уже нулевой → alpha 0.
+            if desc.pattern[i] == TRANSPARENT {
+                continue;
             }
+            // База: фиксированный цвет рисунка (структура §5) либо, для
+            // AUTO, процедурный шум + оверлей — как было до паттернов.
+            let cell = desc.pattern[i];
+            let color = if (cell as usize) < 4 {
+                desc.palette[cell as usize]
+            } else {
+                let structure = value_noise(seed, x, y, desc.cell_log2);
+                let mut c = desc.palette[(structure as usize).clamp(0, 255) * 4 / 256];
+                match desc.overlay {
+                    Overlay::None => {}
+                    // Кластеры 2×2: один бросок на ячейку — крапинка читается
+                    // как объект, а не как шум-«песок».
+                    Overlay::Speckle { color: oc, chance } => {
+                        if hash2(seed ^ 0xC3, (x / 2) as i32, (y / 2) as i32) & 0xFF
+                            < chance as u32
+                        {
+                            c = oc;
+                        }
+                    }
+                    // Полоса каждые `period` столбцов, с дрожанием положения.
+                    Overlay::Stripes { color: oc, period } => {
+                        let jitter = hash2(seed ^ 0x51, (x / period as u32) as i32, 0) & 1;
+                        if x % period as u32 == jitter {
+                            c = oc;
+                        }
+                    }
+                    // Глубина кромки своя в каждом столбце → рваный край.
+                    Overlay::TopBand { palette, min_depth, max_depth } => {
+                        let depth = min_depth as u32
+                            + hash2(seed ^ 0x77, x as i32, 0) % (max_depth - min_depth + 1) as u32;
+                        if y < depth {
+                            c = palette[(hash2(seed ^ 0x77, x as i32, y as i32) & 1) as usize];
+                        }
+                    }
+                }
+                c
+            };
 
             // Зерно: независимый сид, знаковое отклонение яркости −v..=+v.
             let grain = (hash2(seed ^ 0xA5A5, x as i32, y as i32) & 0xFF) as i32;
             let bright = 256 + tone + ((grain - 128) * desc.variation as i32) / 128;
-            let px = &mut out[((y as usize * TEX_SIZE + x as usize) * 4)..][..4];
+            let px = &mut out[(i * 4)..][..4];
             for (dst, &c) in px[..3].iter_mut().zip(&color) {
                 *dst = ((c as i32 * bright) >> 8).clamp(0, 255) as u8;
             }
@@ -284,6 +325,22 @@ mod tests {
     /// Зафиксированный хеш эталонной текстуры. Меняется только вместе
     /// с версией генератора (§4).
     // Обновлён вместе с полем spread (разброс тона вариантов §5).
-    // До альфы-релиза менять эталон законно.
+    // Паттерн STONE — весь AUTO, поэтому хеш НЕ изменился: путь AUTO
+    // байт-в-байт совпадает с прежним. До альфы менять эталон законно.
     const GOLDEN_STONE_42: u64 = 12642292647876812355;
+
+    /// Паттерн-рисунок честно правит пиксели: фиксированная ячейка даёт
+    /// точный цвет палитры, прозрачная — нулевую альфу (§5).
+    #[test]
+    fn pattern_draws_and_punches_holes() {
+        let mut d = STONE;
+        d.variation = 0; // убираем зерно, чтобы сверять чистый цвет
+        d.spread = 0;
+        d.pattern[0] = 2; // ячейка (0,0) — фиксированный индекс палитры 2
+        d.pattern[1] = TRANSPARENT; // ячейка (1,0) — дырка
+        let tex = bake(&d, 7);
+        assert_eq!(&tex[0..3], &STONE.palette[2]); // точный цвет рисунка
+        assert_eq!(tex[3], 255); // непрозрачна
+        assert_eq!(tex[7], 0); // соседняя — прозрачна (alpha 0)
+    }
 }

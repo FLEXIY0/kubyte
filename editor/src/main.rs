@@ -12,8 +12,10 @@
 //! (§4, §10): в репозиторий едут только числа.
 
 use eframe::egui;
-use egui::{Color32, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
-use kb_materials::{bake, variant_seed, Descriptor, Overlay, TEX_SIZE};
+use egui::{Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
+use kb_materials::{
+    bake, variant_seed, Descriptor, Overlay, Pattern, AUTO, AUTO_PATTERN, TEX_SIZE, TRANSPARENT,
+};
 
 const VARIANT_PREVIEWS: usize = 8; // §12: «сетка из 8–16 вариантов»
 const MAX_VARIATION: u8 = 38; // инвариант §5: вариация ≤ ±15%
@@ -47,6 +49,10 @@ struct Editor {
     reference: Option<TextureHandle>,
     path_input: String,
     status: String,
+    /// Текущая кисть холста: 0..3 — индекс палитры, AUTO, TRANSPARENT.
+    brush: u8,
+    /// Референс из KB_REF, ждущий первого кадра (нужен ctx для текстуры).
+    pending: Option<String>,
 }
 
 impl Editor {
@@ -74,6 +80,9 @@ impl Editor {
             reference: None,
             path_input: String::new(),
             status: "перетащи PNG в окно или укажи путь к референсу".into(),
+            brush: AUTO,
+            // KB_REF — отладочная автозагрузка референса на старте.
+            pending: std::env::var("KB_REF").ok(),
         }
     }
 
@@ -91,24 +100,29 @@ impl Editor {
     }
 
     /// Загрузка референса: drag-and-drop отдаёт путь, текстовое поле — тоже.
+    /// Из картинки берётся палитра + ПАТТЕРН (квантованная структура) и
+    /// прозрачность — так результат «ближе к исходнику», а не чистый шум.
     fn try_load(&mut self, ctx: &egui::Context, path: &str) {
         match image::open(path) {
             Ok(img) => {
-                // К нашему разрешению: статистика берётся в масштабе тайла.
-                let small = img.to_rgb8();
-                let small =
-                    image::imageops::resize(&small, 16, 16, image::imageops::FilterType::Triangle);
+                // К нашему разрешению: и палитра, и рисунок берутся в масштабе тайла.
+                let small = image::imageops::resize(
+                    &img.to_rgba8(),
+                    16,
+                    16,
+                    image::imageops::FilterType::Triangle,
+                );
                 self.blocks[self.sel].desc = analyze(&small);
                 // Превью референса — апскейл его же 16×16, чтобы видеть источник.
                 let mut rgba = Vec::with_capacity(16 * 16 * 4);
                 for p in small.pixels() {
-                    rgba.extend([p[0], p[1], p[2], 255]);
+                    rgba.extend(p.0);
                 }
                 let cimg = egui::ColorImage::from_rgba_unmultiplied([16, 16], &rgba);
                 self.reference =
                     Some(ctx.load_texture("reference", cimg, TextureOptions::NEAREST));
                 self.dirty = true;
-                self.status = format!("референс проанализирован: {path}");
+                self.status = format!("референс → палитра + рисунок: {path}");
             }
             Err(e) => self.status = format!("не открыть {path}: {e}"),
         }
@@ -117,6 +131,10 @@ impl Editor {
 
 impl eframe::App for Editor {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Отложенный референс из KB_REF (нужен был ctx).
+        if let Some(p) = self.pending.take() {
+            self.try_load(ctx, &p);
+        }
         // Перетащенные файлы: берём первый с путём.
         let dropped: Option<String> = ctx.input(|i| {
             i.raw
@@ -219,9 +237,86 @@ impl Editor {
             }
 
             ui.separator();
-            ui.label("Превью на блоке + 8 вариантов (тот же генератор, что в игре):");
-            self.preview(ui);
+            ui.columns(2, |cols| {
+                cols[0].label("Холст 16×16 — рисуй паттерн (§5):");
+                self.canvas(&mut cols[0]);
+                cols[1].label("Превью на блоке + 8 вариантов:");
+                self.preview(&mut cols[1]);
+            });
         });
+    }
+
+    /// Холст индексов палитры (§5): кисть красит ячейку фиксированным
+    /// цветом, AUTO (шум) или прозрачностью. Это редактор паттерна, а не
+    /// пиксель-арт: поверх фиксированных ячеек генератор всё равно кладёт
+    /// зерно и тон.
+    fn canvas(&mut self, ui: &mut egui::Ui) {
+        // Линейка кистей: 4 цвета палитры + AUTO + прозрачность.
+        let palette = self.blocks[self.sel].desc.palette;
+        ui.horizontal(|ui| {
+            for (i, c) in palette.iter().enumerate() {
+                let on = self.brush == i as u8;
+                if ui
+                    .add(egui::Button::new(if on { "●" } else { " " }).fill(rgb(*c)))
+                    .clicked()
+                {
+                    self.brush = i as u8;
+                }
+            }
+            if ui.selectable_label(self.brush == AUTO, "шум").clicked() {
+                self.brush = AUTO;
+            }
+            if ui.selectable_label(self.brush == TRANSPARENT, "✕ дыра").clicked() {
+                self.brush = TRANSPARENT;
+            }
+        });
+
+        // Сетка 16×16; рисуем и обрабатываем мазок одним проходом.
+        let cell = 15.0;
+        let side = cell * TEX_SIZE as f32;
+        let (resp, painter) = ui.allocate_painter(Vec2::splat(side), Sense::drag());
+        let origin = resp.rect.min;
+        let pat = &mut self.blocks[self.sel].desc.pattern;
+        for gy in 0..TEX_SIZE {
+            for gx in 0..TEX_SIZE {
+                let r = Rect::from_min_size(
+                    origin + Vec2::new(gx as f32 * cell, gy as f32 * cell),
+                    Vec2::splat(cell),
+                );
+                match pat[gy * TEX_SIZE + gx] {
+                    // Прозрачная — шахматка (общепринятый знак).
+                    TRANSPARENT => {
+                        painter.rect_filled(r, 0.0, Color32::from_gray(70));
+                        let h = Vec2::splat(cell * 0.5);
+                        painter.rect_filled(Rect::from_min_size(r.min, h), 0.0, Color32::from_gray(120));
+                        painter.rect_filled(Rect::from_min_size(r.center(), h), 0.0, Color32::from_gray(120));
+                    }
+                    // AUTO — тёмно-серая «процедурная» ячейка.
+                    AUTO => {
+                        painter.rect_filled(r, 0.0, Color32::from_gray(48));
+                    }
+                    // Фиксированный индекс — соответствующий цвет палитры.
+                    i => {
+                        painter.rect_filled(r, 0.0, rgb(palette[i as usize]));
+                    }
+                }
+            }
+        }
+        // Рисование: позиция мыши → ячейка → кисть.
+        if resp.dragged() || resp.is_pointer_button_down_on() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let gx = ((p.x - origin.x) / cell) as i32;
+                let gy = ((p.y - origin.y) / cell) as i32;
+                if (0..16).contains(&gx) && (0..16).contains(&gy) {
+                    pat[gy as usize * TEX_SIZE + gx as usize] = self.brush;
+                    self.dirty = true;
+                }
+            }
+        }
+        if ui.button("весь холст → шум").clicked() {
+            self.blocks[self.sel].desc.pattern = AUTO_PATTERN;
+            self.dirty = true;
+        }
     }
 
     fn preview(&self, ui: &mut egui::Ui) {
@@ -376,61 +471,100 @@ fn iso_cube(ui: &egui::Ui, rect: Rect, tex: egui::TextureId) {
     ui.painter().add(egui::Shape::mesh(mesh));
 }
 
-/// Снимает с картинки СТАТИСТИКУ стиля и строит наш дескриптор.
-/// Никаких пикселей источника в результате — только числа (§10).
-fn analyze(img: &image::RgbImage) -> Descriptor {
-    let px: Vec<[u8; 3]> = img.pixels().map(|p| [p[0], p[1], p[2]]).collect();
-    let n = px.len();
+fn rgb([r, g, b]: [u8; 3]) -> Color32 {
+    Color32::from_rgb(r, g, b)
+}
+
+/// Снимает с картинки СТАТИСТИКУ стиля и строит наш дескриптор:
+/// палитру по квартилям яркости + ПАТТЕРН (каждый пиксель → ближайший
+/// индекс палитры, прозрачные → дырки). Никаких пикселей источника в
+/// результате — только индексы и числа (§5, §10).
+fn analyze(img: &image::RgbaImage) -> Descriptor {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let grid: Vec<[u8; 4]> = img.pixels().map(|p| p.0).collect();
     let luma = |c: [u8; 3]| 0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32;
 
-    // Палитра — средний цвет каждого яркостного квартиля (тёмный → светлый).
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| luma(px[a]).total_cmp(&luma(px[b])));
+    // Палитра — средний цвет каждого яркостного квартиля непрозрачных
+    // пикселей (тёмный → светлый).
+    let mut opaque: Vec<[u8; 3]> =
+        grid.iter().filter(|p| p[3] >= 128).map(|p| [p[0], p[1], p[2]]).collect();
+    if opaque.is_empty() {
+        opaque.push([128, 128, 128]);
+    }
+    opaque.sort_by(|&a, &b| luma(a).total_cmp(&luma(b)));
     let mut palette = [[0u8; 3]; 4];
+    let m = opaque.len();
     for (q, slot) in palette.iter_mut().enumerate() {
-        let seg = &order[q * n / 4..(q + 1) * n / 4];
+        let seg = &opaque[q * m / 4..((q + 1) * m / 4).max(q * m / 4 + 1)];
         for ch in 0..3 {
-            let sum: u32 = seg.iter().map(|&i| px[i][ch] as u32).sum();
-            slot[ch] = (sum / seg.len().max(1) as u32) as u8;
+            let sum: u32 = seg.iter().map(|c| c[ch] as u32).sum();
+            slot[ch] = (sum / seg.len() as u32) as u8;
         }
     }
 
+    // Паттерн: каждый пиксель → ближайший индекс палитры; прозрачный →
+    // дырка. Это и есть «структура исходника», а не чистый шум (§5).
+    let nearest = |c: [u8; 3]| -> u8 {
+        (0..4)
+            .min_by_key(|&i| {
+                let p = palette[i];
+                (0..3).map(|k| (c[k] as i32 - p[k] as i32).pow(2)).sum::<i32>()
+            })
+            .unwrap() as u8
+    };
+    let mut pattern = AUTO_PATTERN;
+    for (i, p) in grid.iter().enumerate().take(pattern.len()) {
+        pattern[i] = if p[3] < 128 { TRANSPARENT } else { nearest([p[0], p[1], p[2]]) };
+    }
+
     // Зерно — средний контраст соседей по горизонтали → амплитуда вариации.
-    let w = img.width() as usize;
-    let h = img.height() as usize;
     let mut grain = 0.0;
     let mut cnt = 0u32;
     for y in 0..h {
         for x in 0..w - 1 {
-            grain += (luma(px[y * w + x]) - luma(px[y * w + x + 1])).abs();
+            grain += (luma([grid[y * w + x][0], grid[y * w + x][1], grid[y * w + x][2]])
+                - luma([grid[y * w + x + 1][0], grid[y * w + x + 1][1], grid[y * w + x + 1][2]]))
+            .abs();
             cnt += 1;
         }
     }
     let variation = (grain / cnt.max(1) as f32).round().clamp(0.0, MAX_VARIATION as f32) as u8;
 
-    // Доля тёмных пикселей → вкрапления (тем же приёмом делаются руды).
-    let mean = px.iter().map(|&c| luma(c)).sum::<f32>() / n as f32;
-    let dark = px.iter().filter(|&&c| luma(c) < mean * 0.8).count() as f32 / n as f32;
-    let overlay = if dark > 0.04 {
-        Overlay::Speckle { color: palette[0], chance: ((dark * 256.0) as u32).min(255) as u8 }
-    } else {
-        Overlay::None
-    };
-
-    Descriptor { palette, cell_log2: 0, variation, spread: 16, overlay }
+    // Оверлей не нужен: всю структуру несёт паттерн (оверлей действует
+    // только на AUTO-ячейки, которых после анализа нет).
+    Descriptor { palette, cell_log2: 0, variation, spread: 12, overlay: Overlay::None, pattern }
 }
 
 /// Генерирует запись таблицы как валидный Rust (§12: выход — код).
 fn gen_code(name: &str, d: &Descriptor) -> String {
     format!(
-        "pub const {}: Descriptor = Descriptor {{\n    palette: {:?},\n    cell_log2: {},\n    variation: {},\n    spread: {},\n    overlay: {},\n}};\n\n",
+        "pub const {}: Descriptor = Descriptor {{\n    palette: {:?},\n    cell_log2: {},\n    variation: {},\n    spread: {},\n    overlay: {},\n    pattern: {},\n}};\n\n",
         name.to_uppercase(),
         d.palette,
         d.cell_log2,
         d.variation,
         d.spread,
         overlay_code(&d.overlay),
+        pattern_code(&d.pattern),
     )
+}
+
+/// Паттерн в код: всё-AUTO → ссылка на готовую константу, иначе массив
+/// по 16 чисел в ряд (§5: «битмап-паттерн прямо в коде»).
+fn pattern_code(p: &Pattern) -> String {
+    if p.iter().all(|&c| c == AUTO) {
+        return "AUTO_PATTERN".into();
+    }
+    let mut s = String::from("[\n");
+    for row in p.chunks(TEX_SIZE) {
+        s.push_str("        ");
+        for &c in row {
+            s.push_str(&format!("{c}, "));
+        }
+        s.push('\n');
+    }
+    s.push_str("    ]");
+    s
 }
 
 fn overlay_code(ov: &Overlay) -> String {

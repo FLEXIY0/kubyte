@@ -91,7 +91,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // в пикселе, а не в геометрии.
     let block = vec3<i32>(floor(in.world - NORMALS[in.nidx] * 0.5));
     let layer = in.layer * 16u + variant_of(block);
-    let albedo = textureSample(tex, samp, fract(in.uv), layer).rgb;
+    let texel = textureSample(tex, samp, fract(in.uv), layer);
+    // Альфа-отсечение (§5): прозрачные пиксели паттерна — дырки (листва,
+    // стекло). Cutout, а не блендинг: depth остаётся корректным.
+    if texel.a < 0.5 {
+        discard;
+    }
+    let albedo = texel.rgb;
     // Два света складываются цветом: холодное небо против тёплого янтаря —
     // «дом милый дом» как контраст температур (§6, §14).
     let lit = curve(in.light.x) * camera.sun.a * camera.sun.rgb
