@@ -19,6 +19,21 @@ use winit::{
 #[cfg(not(target_arch = "wasm32"))]
 const SAVE_PATH: &str = "kb.save";
 
+/// Запуск редактора материалов/интерфейса (отладочная утилита, §12):
+/// бинарник лежит рядом с игрой и поставляется в том же релизе, поэтому
+/// открывается прямо из игры — без отдельного архива. egui-оверлей поверх
+/// нашего wgpu 29 невозможен (нет egui-wgpu под эту версию), так что
+/// редактор — отдельный процесс.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_editor() {
+    if let Ok(mut exe) = std::env::current_exe() {
+        exe.set_file_name(if cfg!(windows) { "kb-editor.exe" } else { "kb-editor" });
+        let _ = std::process::Command::new(exe).spawn();
+    }
+}
+#[cfg(target_arch = "wasm32")]
+fn open_editor() {}
+
 /// Готовый рендер прилетает в событийный цикл как user event: на нативе —
 /// сразу из `resumed`, в браузере — из `spawn_local`, когда адаптер
 /// наконец выдан. Один и тот же путь доставки на обеих платформах.
@@ -202,9 +217,33 @@ impl ApplicationHandler<GfxReady> for App {
             }
             WindowEvent::KeyboardInput { event: key, .. } => {
                 if let PhysicalKey::Code(code) = key.physical_key {
+                    // Меню паузы перехватывает ввод, когда открыто.
+                    if key.state.is_pressed() {
+                        if let Some(gfx) = &mut self.gfx {
+                            if gfx.menu_open() {
+                                match code {
+                                    KeyCode::Escape => gfx.toggle_menu(),
+                                    KeyCode::ArrowUp => gfx.menu_move(-1),
+                                    KeyCode::ArrowDown => gfx.menu_move(1),
+                                    KeyCode::ArrowLeft => gfx.menu_adjust(-1),
+                                    KeyCode::ArrowRight => gfx.menu_adjust(1),
+                                    _ => {}
+                                }
+                                return; // игровой ввод не обрабатываем
+                            }
+                        }
+                    }
                     if key.state.is_pressed() {
                         match code {
-                            KeyCode::Escape => self.grab(false),
+                            // Esc открывает меню настроек и отпускает мышь.
+                            KeyCode::Escape => {
+                                self.grab(false);
+                                if let Some(gfx) = &mut self.gfx {
+                                    gfx.toggle_menu();
+                                }
+                            }
+                            // F1 — редактор материалов/интерфейса рядом с игрой.
+                            KeyCode::F1 => open_editor(),
                             KeyCode::KeyF => {
                                 if let Some(gfx) = &mut self.gfx {
                                     gfx.toggle_fly();
@@ -241,7 +280,10 @@ impl ApplicationHandler<GfxReady> for App {
                 let dt = (now - *last).as_secs_f32().min(0.1);
                 *last = now;
 
-                gfx.tick(dt, self.keys.axes());
+                // Меню паузы замораживает симуляцию; рендер продолжается.
+                if !gfx.menu_open() {
+                    gfx.tick(dt, self.keys.axes());
+                }
                 gfx.render();
 
                 // Непрерывная анимация: следующий кадр сразу по vsync.

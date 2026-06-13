@@ -10,7 +10,19 @@ skylight+blocklight (холодная ночь / тёплый янтарь ла�
 
 **Управление:** WASD — ходьба, Space — прыжок, мышь — взгляд (клик —
 захват, Esc — отпустить), ЛКМ/ПКМ — сломать/поставить, 1–6 — блок в руке
-(камень/земля/трава/дерево/листва/фонарь), F — полёт.
+(камень/земля/трава/дерево/листва/фонарь), F — полёт, **F1 — редактор
+материалов/интерфейса** (отладочная утилита, открывается рядом с игрой).
+
+## Скачать (прямые .exe, без архива)
+
+Свежая dev-сборка обновляется на каждый коммит:
+
+- **[kb-windows.exe](https://github.com/FLEXIY0/kubyte/releases/download/dev/kb-windows.exe)** — игра (Windows)
+- **[kb-editor-windows.exe](https://github.com/FLEXIY0/kubyte/releases/download/dev/kb-editor-windows.exe)** — редактор материалов и интерфейса
+- Linux: [kb-linux](https://github.com/FLEXIY0/kubyte/releases/download/dev/kb-linux), [kb-editor-linux](https://github.com/FLEXIY0/kubyte/releases/download/dev/kb-editor-linux) (`chmod +x`)
+
+Все сборки — на странице [releases/dev](https://github.com/FLEXIY0/kubyte/releases/tag/dev).
+В игре **F1** открывает редактор (лежит рядом с `kb.exe`).
 
 ## Сборка
 

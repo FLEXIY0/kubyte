@@ -45,6 +45,9 @@ struct HudUniform {
     bar_bg: [f32; 4],
     bar_border: [f32; 4],
     bar_sel: [f32; 4],
+    // Меню/настройки: x — открыто, y — выбранный пункт, z — масштаб
+    // пикселей (для пипсов), w — дизеринг вкл.
+    menu: [f32; 4],
 }
 
 fn srgb3(c: [u8; 3]) -> [f32; 4] {
@@ -52,7 +55,7 @@ fn srgb3(c: [u8; 3]) -> [f32; 4] {
 }
 
 impl HudUniform {
-    fn new(style: &kb_materials::HudStyle, hp: i8, max_hp: i8, sel: u32) -> Self {
+    fn new(style: &kb_materials::HudStyle, hp: i8, max_hp: i8, sel: u32, menu: [f32; 4]) -> Self {
         let mut rows = [[0u32; 4]; 9];
         for (i, r) in rows.iter_mut().enumerate() {
             r[0] = style.heart[i] as u32;
@@ -70,6 +73,7 @@ impl HudUniform {
             bar_bg,
             bar_border: srgb3(style.bar_border),
             bar_sel: srgb3(style.bar_sel),
+            menu,
         }
     }
 }
@@ -204,14 +208,15 @@ impl Offscreen {
     fn new(
         device: &wgpu::Device,
         surface_size: (u32, u32),
+        scale: u32,
         blit_layout: &wgpu::BindGroupLayout,
         sampler: &wgpu::Sampler,
         hud: &wgpu::Buffer,
         atlas: &wgpu::TextureView,
     ) -> Self {
         let size = wgpu::Extent3d {
-            width: (surface_size.0 / PIXEL_SCALE).max(1),
-            height: (surface_size.1 / PIXEL_SCALE).max(1),
+            width: (surface_size.0 / scale).max(1),
+            height: (surface_size.1 / scale).max(1),
             depth_or_array_layers: 1,
         };
         let tex = |label, format, usage| {
@@ -300,6 +305,11 @@ pub struct Gfx {
     pub camera: Camera,
     /// Игровое время суток, секунд. Стартуем утром.
     time: f32,
+    /// Настройки и меню паузы (§6).
+    pixel_scale: u32,
+    dither: bool,
+    menu_open: bool,
+    menu_sel: u32, // 0 — масштаб пикселей, 1 — дизеринг
 }
 
 impl Gfx {
@@ -702,7 +712,8 @@ impl Gfx {
             cache: None,
         });
 
-        let offscreen = Offscreen::new(&device, size, &blit_layout, &nearest, &hud_buf, &atlas);
+        let offscreen =
+            Offscreen::new(&device, size, PIXEL_SCALE, &blit_layout, &nearest, &hud_buf, &atlas);
 
         // Спавн — на поверхности в начале координат.
         // KB_PITCH / KB_YAW (радианы) — отладочный стартовый взгляд (native).
@@ -759,7 +770,52 @@ impl Gfx {
                 .unwrap_or(DAY_SECONDS * 0.1),
             #[cfg(target_arch = "wasm32")]
             time: DAY_SECONDS * 0.1,
+            pixel_scale: PIXEL_SCALE,
+            dither: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            menu_open: std::env::var("KB_MENU").is_ok(),
+            #[cfg(target_arch = "wasm32")]
+            menu_open: false,
+            menu_sel: 0,
         })
+    }
+
+    /// Открыто ли меню паузы (игра не реагирует на игровой ввод).
+    pub fn menu_open(&self) -> bool {
+        self.menu_open
+    }
+
+    pub fn toggle_menu(&mut self) {
+        self.menu_open = !self.menu_open;
+    }
+
+    /// Перемещение по пунктам меню (2 пункта).
+    pub fn menu_move(&mut self, delta: i32) {
+        self.menu_sel = (self.menu_sel as i32 + delta).rem_euclid(2) as u32;
+    }
+
+    /// Изменение выбранной настройки. Масштаб пикселей пересоздаёт
+    /// offscreen-буфер (§6: integer scaling ×1–4).
+    pub fn menu_adjust(&mut self, delta: i32) {
+        match self.menu_sel {
+            0 => {
+                self.pixel_scale = (self.pixel_scale as i32 + delta).clamp(1, 4) as u32;
+                self.remake_offscreen();
+            }
+            _ => self.dither = !self.dither,
+        }
+    }
+
+    fn remake_offscreen(&mut self) {
+        self.offscreen = Offscreen::new(
+            &self.device,
+            (self.config.width, self.config.height),
+            self.pixel_scale,
+            &self.blit_layout,
+            &self.nearest,
+            &self.hud_buf,
+            &self.atlas,
+        );
     }
 
     /// Шаг геймплея: в Walk — симуляция игрока (§3: физика в /core),
@@ -871,6 +927,7 @@ impl Gfx {
         self.offscreen = Offscreen::new(
             &self.device,
             (width, height),
+            self.pixel_scale,
             &self.blit_layout,
             &self.nearest,
             &self.hud_buf,
@@ -924,8 +981,14 @@ impl Gfx {
             self.queue.write_buffer(&self.parts_buf, 0, &parts_data);
         }
 
-        // HUD: динамика (hp/слот) + стиль интерфейса для блита.
-        let hud = HudUniform::new(&kb_materials::HUD, self.hp, MAX_HP, self.hotbar_sel);
+        // HUD: динамика (hp/слот/меню) + стиль интерфейса для блита.
+        let menu = [
+            self.menu_open as u32 as f32,
+            self.menu_sel as f32,
+            self.pixel_scale as f32,
+            self.dither as u32 as f32,
+        ];
+        let hud = HudUniform::new(&kb_materials::HUD, self.hp, MAX_HP, self.hotbar_sel, menu);
         self.queue.write_buffer(&self.hud_buf, 0, bytemuck::bytes_of(&hud));
 
         use wgpu::CurrentSurfaceTexture as Cst;

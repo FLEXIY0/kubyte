@@ -56,6 +56,36 @@ jobs:
           name: ${{ matrix.artifact }}-editor
           path: ${{ matrix.editor }}
 
+  # Прямые .exe без зипа: катящийся пререлиз «dev» с готовыми бинарниками
+  # как ассетами — их можно скачать одним кликом (не архив).
+  release:
+    needs: native
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+      - name: Собрать ассеты с понятными именами
+        run: |
+          mkdir out
+          cp "art/kb-windows-x86_64/kb.exe"               out/kb-windows.exe
+          cp "art/kb-windows-x86_64-editor/kb-editor.exe" out/kb-editor-windows.exe
+          cp "art/kb-linux-x86_64/kb"                     out/kb-linux
+          cp "art/kb-linux-x86_64-editor/kb-editor"       out/kb-editor-linux
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          name: kb — свежая dev-сборка
+          prerelease: true
+          body: |
+            Автосборка последнего коммита ветки. Прямые загрузки (не архивы):
+            - **kb-windows.exe** — игра (Windows). В игре F1 открывает редактор.
+            - **kb-editor-windows.exe** — редактор материалов и интерфейса.
+            - kb-linux / kb-editor-linux — то же под Linux (chmod +x).
+          files: out/*
+
   web:
     runs-on: ubuntu-latest
     steps:

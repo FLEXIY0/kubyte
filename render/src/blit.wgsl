@@ -16,6 +16,7 @@ struct Hud {
     bar_bg: vec4<f32>,         // rgb + a (сила наложения подложки)
     bar_border: vec4<f32>,
     bar_sel: vec4<f32>,
+    menu: vec4<f32>,           // x — открыто, y — пункт, z — масштаб, w — дизеринг
 };
 @group(0) @binding(2) var<uniform> hud: Hud;
 @group(0) @binding(3) var atlas: texture_2d_array<f32>;
@@ -68,9 +69,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
          3.0, 11.0,  1.0,  9.0,
         15.0,  7.0, 13.0,  5.0,
     );
-    let src_px = vec2<u32>(in.uv * vec2<f32>(textureDimensions(src)));
-    let threshold = (bayer[(src_px.y % 4u) * 4u + src_px.x % 4u] + 0.5) / 16.0;
-    color = floor(color * 31.0 + threshold) / 31.0;
+    if hud.menu.w > 0.5 { // дизеринг — настройка меню
+        let src_px = vec2<u32>(in.uv * vec2<f32>(textureDimensions(src)));
+        let threshold = (bayer[(src_px.y % 4u) * 4u + src_px.x % 4u] + 0.5) / 16.0;
+        color = floor(color * 31.0 + threshold) / 31.0;
+    }
 
     // Экран в GUI-пикселях; размер восстановлен из производных uv.
     let res = 1.0 / vec2(dpdx(in.uv.x), dpdy(in.uv.y));
@@ -139,6 +142,51 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         } else if heart_at(hx - 2, hyi) || heart_at(hx, hyi)
             || heart_at(hx - 1, hyi - 1) || heart_at(hx - 1, hyi + 1) {
             color = hud.outline.rgb; // обводка по всему контуру
+        }
+    }
+
+    // --- Меню паузы (§6: настройки) --------------------------------------
+    if hud.menu.x > 0.5 {
+        color *= 0.35; // затемняем мир
+        // Панель 120×54 GUI-px по центру.
+        let pw = 120.0;
+        let ph = 54.0;
+        let m = vec2(g.x - (size.x / 2.0 - pw / 2.0), g.y - (size.y / 2.0 - ph / 2.0));
+        if all(m >= vec2(0.0)) && all(m < vec2(pw, ph)) {
+            color = mix(color, vec3(0.07, 0.08, 0.10), 0.85);
+            if m.x < 1.0 || m.x >= pw - 1.0 || m.y < 1.0 || m.y >= ph - 1.0 {
+                color = vec3(0.55);
+            }
+            // Две строки настроек по 18 px; подсветка выбранной.
+            let row = floor((m.y - 8.0) / 18.0);
+            let inrow = m.y - 8.0 - row * 18.0;
+            if row >= 0.0 && row < 2.0 && inrow >= 0.0 && inrow < 14.0 && m.x >= 8.0 && m.x < pw - 8.0 {
+                if row == hud.menu.y {
+                    color = mix(color, vec3(0.20, 0.28, 0.40), 0.6);
+                }
+                let lx = m.x - 8.0;
+                if row == 0.0 {
+                    // Масштаб пикселей: 4 пипса, залитые = текущий.
+                    let pip = floor(lx / 12.0);
+                    if pip >= 0.0 && pip < 4.0 && inrow >= 3.0 && inrow < 11.0
+                        && (lx - pip * 12.0) >= 0.0 && (lx - pip * 12.0) < 8.0 {
+                        if pip < hud.menu.z {
+                            color = vec3(0.85);
+                        } else {
+                            color = vec3(0.25);
+                        }
+                    }
+                } else {
+                    // Дизеринг: квадрат-индикатор (зелёный вкл / серый выкл).
+                    if lx >= 0.0 && lx < 10.0 && inrow >= 2.0 && inrow < 12.0 {
+                        if hud.menu.w > 0.5 {
+                            color = vec3(0.35, 0.80, 0.40);
+                        } else {
+                            color = vec3(0.30);
+                        }
+                    }
+                }
+            }
         }
     }
 
