@@ -30,6 +30,50 @@ pub const HOTBAR: [Option<Block>; 9] = [
     None,
 ];
 
+/// Юниформ HUD для блита: динамика (hp/слот) + стиль из kb_materials::HUD.
+/// std140-раскладка: все поля выровнены на 16 байт (vec4).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct HudUniform {
+    hp: [f32; 4], // x — здоровье, y — максимум, z — выбранный слот
+    // 9 строк: .x — биты сердца, .y — биты блика (остальное паддинг).
+    rows: [[u32; 4]; 9],
+    full: [f32; 4],
+    empty: [f32; 4],
+    outline: [f32; 4],
+    highlight: [f32; 4],
+    bar_bg: [f32; 4],
+    bar_border: [f32; 4],
+    bar_sel: [f32; 4],
+}
+
+fn srgb3(c: [u8; 3]) -> [f32; 4] {
+    [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0]
+}
+
+impl HudUniform {
+    fn new(style: &kb_materials::HudStyle, hp: i8, max_hp: i8, sel: u32) -> Self {
+        let mut rows = [[0u32; 4]; 9];
+        for (i, r) in rows.iter_mut().enumerate() {
+            r[0] = style.heart[i] as u32;
+            r[1] = style.glint[i] as u32;
+        }
+        let mut bar_bg = srgb3([style.bar_bg[0], style.bar_bg[1], style.bar_bg[2]]);
+        bar_bg[3] = style.bar_bg[3] as f32 / 255.0; // сила наложения подложки
+        Self {
+            hp: [hp as f32, max_hp as f32, sel as f32, 0.0],
+            rows,
+            full: srgb3(style.full),
+            empty: srgb3(style.empty),
+            outline: srgb3(style.outline),
+            highlight: srgb3(style.highlight),
+            bar_bg,
+            bar_border: srgb3(style.bar_border),
+            bar_sel: srgb3(style.bar_sel),
+        }
+    }
+}
+
 /// Во сколько раз offscreen-буфер меньше экрана. Целое — пиксели обязаны
 /// быть одинаковой ширины (integer scaling, §6). Станет настройкой в M4.
 const PIXEL_SCALE: u32 = 3;
@@ -599,7 +643,7 @@ impl Gfx {
         // --- Блит: offscreen → экран -------------------------------------
         let hud_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("hud"),
-            size: 16, // vec4: hp, max_hp, 0, 0
+            size: core::mem::size_of::<HudUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -880,17 +924,9 @@ impl Gfx {
             self.queue.write_buffer(&self.parts_buf, 0, &parts_data);
         }
 
-        // HUD: здоровье и выбранный слот для блита.
-        self.queue.write_buffer(
-            &self.hud_buf,
-            0,
-            bytemuck::cast_slice(&[
-                self.hp as f32,
-                MAX_HP as f32,
-                self.hotbar_sel as f32,
-                0.0,
-            ]),
-        );
+        // HUD: динамика (hp/слот) + стиль интерфейса для блита.
+        let hud = HudUniform::new(&kb_materials::HUD, self.hp, MAX_HP, self.hotbar_sel);
+        self.queue.write_buffer(&self.hud_buf, 0, bytemuck::bytes_of(&hud));
 
         use wgpu::CurrentSurfaceTexture as Cst;
         let frame = match self.surface.get_current_texture() {

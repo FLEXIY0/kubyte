@@ -14,8 +14,16 @@
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
 use kb_materials::{
-    bake, variant_seed, Descriptor, Overlay, Pattern, AUTO, AUTO_PATTERN, TEX_SIZE, TRANSPARENT,
+    bake, variant_seed, Descriptor, HudStyle, Overlay, Pattern, AUTO, AUTO_PATTERN, TEX_SIZE,
+    TRANSPARENT,
 };
+
+/// Что редактируем: материалы блоков или интерфейс (HUD).
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Mode {
+    Materials,
+    Hud,
+}
 
 const VARIANT_PREVIEWS: usize = 8; // §12: «сетка из 8–16 вариантов»
 const MAX_VARIATION: u8 = 38; // инвариант §5: вариация ≤ ±15%
@@ -63,6 +71,12 @@ struct Editor {
     baseline: Descriptor,
     /// Растущий сид перетасовки — каждый клик даёт новую раскладку.
     shuffle_seed: u64,
+    /// Активная вкладка редактора.
+    mode: Mode,
+    /// Редактируемый стиль интерфейса.
+    hud: HudStyle,
+    /// Кисть холста сердца: 0 — силуэт, 1 — блик, 2 — стереть.
+    hud_brush: u8,
 }
 
 impl Editor {
@@ -97,6 +111,13 @@ impl Editor {
             undo_pending: None,
             baseline: kb_materials::STONE,
             shuffle_seed: 0,
+            mode: if std::env::var("KB_TAB").as_deref() == Ok("hud") {
+                Mode::Hud
+            } else {
+                Mode::Materials
+            },
+            hud: kb_materials::HUD,
+            hud_brush: 0,
         }
     }
 
@@ -210,6 +231,18 @@ impl eframe::App for Editor {
         if self.dirty {
             self.rebuild(ctx);
             self.dirty = false;
+        }
+
+        // Переключатель вкладок «Материалы» / «Интерфейс».
+        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.mode, Mode::Materials, "Материалы");
+                ui.selectable_value(&mut self.mode, Mode::Hud, "Интерфейс");
+            });
+        });
+        if self.mode == Mode::Hud {
+            self.hud_panel(ctx);
+            return;
         }
 
         // Снимок состояния на входе в кадр — для коалесинга истории.
@@ -341,6 +374,144 @@ impl Editor {
     /// цветом, AUTO (шум) или прозрачностью. Это редактор паттерна, а не
     /// пиксель-арт: поверх фиксированных ячеек генератор всё равно кладёт
     /// зерно и тон.
+    /// Вкладка «Интерфейс»: правка сердца (форма + блик) и цветов хотбара,
+    /// живое превью тем же алгоритмом, что в blit.wgsl, экспорт кода.
+    fn hud_panel(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("hud_code").default_height(150.0).show(ctx, |ui| {
+            if ui.button("копировать HUD-код").clicked() {
+                ctx.copy_text(hud_code(&self.hud));
+            }
+            let mut code = hud_code(&self.hud);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut code).code_editor().desired_width(f32::INFINITY),
+                );
+            });
+        });
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.columns(2, |c| {
+                c[0].label("Сердце 9×9 — рисуй силуэт и блик:");
+                c[0].horizontal(|ui| {
+                    ui.selectable_value(&mut self.hud_brush, 0u8, "силуэт");
+                    ui.selectable_value(&mut self.hud_brush, 1u8, "блик");
+                    ui.selectable_value(&mut self.hud_brush, 2u8, "стереть");
+                });
+                self.heart_canvas(&mut c[0]);
+
+                let ui = &mut c[1];
+                ui.label("Цвета сердец:");
+                color_row(ui, &mut self.hud.full, "полное");
+                color_row(ui, &mut self.hud.empty, "пустое");
+                color_row(ui, &mut self.hud.outline, "обводка");
+                color_row(ui, &mut self.hud.highlight, "блик");
+                ui.separator();
+                ui.label("Хотбар:");
+                ui.horizontal(|ui| {
+                    let mut bg = [self.hud.bar_bg[0], self.hud.bar_bg[1], self.hud.bar_bg[2]];
+                    if ui.color_edit_button_srgb(&mut bg).changed() {
+                        self.hud.bar_bg[0] = bg[0];
+                        self.hud.bar_bg[1] = bg[1];
+                        self.hud.bar_bg[2] = bg[2];
+                    }
+                    ui.add(egui::Slider::new(&mut self.hud.bar_bg[3], 0..=255).text("плотность"));
+                });
+                color_row(ui, &mut self.hud.bar_border, "рамка");
+                color_row(ui, &mut self.hud.bar_sel, "выбранный слот");
+                ui.separator();
+                ui.label("Превью (как в игре):");
+                self.hud_preview(ui);
+            });
+        });
+    }
+
+    /// Холст сердца: клик кистью ставит/снимает бит силуэта или блика.
+    fn heart_canvas(&mut self, ui: &mut egui::Ui) {
+        let s = 20.0;
+        let (resp, painter) = ui.allocate_painter(Vec2::splat(s * 9.0), Sense::drag());
+        let origin = resp.rect.min;
+        for y in 0..9 {
+            for x in 0..9 {
+                let r = Rect::from_min_size(
+                    origin + Vec2::new(x as f32 * s, y as f32 * s),
+                    Vec2::splat(s),
+                );
+                let chk = if (x + y) % 2 == 0 { 40 } else { 50 };
+                painter.rect_filled(r, 0.0, Color32::from_gray(chk));
+                let (hb, gb) = (bit_get(&self.hud.heart, x, y), bit_get(&self.hud.glint, x, y));
+                if hb {
+                    painter.rect_filled(r, 0.0, if gb { rgb(self.hud.highlight) } else { rgb(self.hud.full) });
+                } else if gb {
+                    // Блик без силуэта — маленький маркер, чтобы было видно.
+                    painter.rect_filled(
+                        Rect::from_center_size(r.center(), Vec2::splat(s * 0.4)),
+                        0.0,
+                        rgb(self.hud.highlight),
+                    );
+                }
+            }
+        }
+        if resp.dragged() || resp.is_pointer_button_down_on() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let x = ((p.x - origin.x) / s) as i32;
+                let y = ((p.y - origin.y) / s) as i32;
+                match self.hud_brush {
+                    0 => bit_set(&mut self.hud.heart, x, y, true),
+                    1 => bit_set(&mut self.hud.glint, x, y, true),
+                    _ => {
+                        bit_set(&mut self.hud.heart, x, y, false);
+                        bit_set(&mut self.hud.glint, x, y, false);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Превью: ряд сердец (полные/пустые) + миниатюра хотбара.
+    fn hud_preview(&self, ui: &mut egui::Ui) {
+        let s = 4.0;
+        let (resp, painter) =
+            ui.allocate_painter(Vec2::new(10.0 * 9.0 * s, 11.0 * s + 8.0 + 24.0 * s), Sense::hover());
+        let o = resp.rect.min;
+        // 10 сердец, здоровье 15/20 — видно полные и пустые.
+        let hp = 15.0;
+        for i in 0..10 {
+            let fill = (i as f32) * 2.0 + 1.0 <= hp;
+            draw_heart(&painter, o + Vec2::new(i as f32 * 9.0 * s, 0.0), s, &self.hud, fill);
+        }
+        // Миниатюра хотбара: подложка над травяным фоном, рамка, выбор.
+        let by = o.y + 11.0 * s + 8.0;
+        let bs = 4.0;
+        let bar = Rect::from_min_size(Pos2::new(o.x, by), Vec2::new(182.0 * bs / 2.0, 22.0 * bs / 2.0));
+        painter.rect_filled(bar, 0.0, rgb([90, 150, 60])); // «трава» под хотбаром
+        let a = self.hud.bar_bg[3] as f32 / 255.0;
+        let bg = [
+            (90.0 * (1.0 - a) + self.hud.bar_bg[0] as f32 * a) as u8,
+            (150.0 * (1.0 - a) + self.hud.bar_bg[1] as f32 * a) as u8,
+            (60.0 * (1.0 - a) + self.hud.bar_bg[2] as f32 * a) as u8,
+        ];
+        painter.rect_filled(bar.shrink(bs), 0.0, rgb(bg));
+        // Рамка (1 GUI-px = bs/2).
+        let b = bs / 2.0;
+        for edge in [
+            Rect::from_min_size(bar.min, Vec2::new(bar.width(), b)),
+            Rect::from_min_size(Pos2::new(bar.min.x, bar.max.y - b), Vec2::new(bar.width(), b)),
+            Rect::from_min_size(bar.min, Vec2::new(b, bar.height())),
+            Rect::from_min_size(Pos2::new(bar.max.x - b, bar.min.y), Vec2::new(b, bar.height())),
+        ] {
+            painter.rect_filled(edge, 0.0, rgb(self.hud.bar_border));
+        }
+        // Рамка выбранного слота (первый слот).
+        let sel = Rect::from_min_size(Pos2::new(o.x + b, by), Vec2::new(24.0 * b, 23.0 * b));
+        for edge in [
+            Rect::from_min_size(sel.min, Vec2::new(sel.width(), b)),
+            Rect::from_min_size(Pos2::new(sel.min.x, sel.max.y - b), Vec2::new(sel.width(), b)),
+            Rect::from_min_size(sel.min, Vec2::new(b, sel.height())),
+            Rect::from_min_size(Pos2::new(sel.max.x - b, sel.min.y), Vec2::new(b, sel.height())),
+        ] {
+            painter.rect_filled(edge, 0.0, rgb(self.hud.bar_sel));
+        }
+    }
+
     fn canvas(&mut self, ui: &mut egui::Ui) {
         // Линейка кистей: 4 цвета палитры + AUTO + прозрачность.
         let palette = self.blocks[self.sel].desc.palette;
@@ -581,6 +752,77 @@ fn iso_cube(ui: &egui::Ui, rect: Rect, tex: egui::TextureId) {
 
 fn rgb([r, g, b]: [u8; 3]) -> Color32 {
     Color32::from_rgb(r, g, b)
+}
+
+/// Строка «цвет + подпись» для панели HUD.
+fn color_row(ui: &mut egui::Ui, c: &mut [u8; 3], label: &str) {
+    ui.horizontal(|ui| {
+        ui.color_edit_button_srgb(c);
+        ui.label(label);
+    });
+}
+
+// --- HUD: правка сердец и хотбара -------------------------------------------
+
+fn bit_get(rows: &[u16; 9], x: i32, y: i32) -> bool {
+    (0..9).contains(&x) && (0..9).contains(&y) && (rows[y as usize] >> (8 - x) as u16) & 1 == 1
+}
+fn bit_set(rows: &mut [u16; 9], x: i32, y: i32, on: bool) {
+    if !(0..9).contains(&x) || !(0..9).contains(&y) {
+        return;
+    }
+    let m = 1u16 << (8 - x) as u16;
+    if on {
+        rows[y as usize] |= m;
+    } else {
+        rows[y as usize] &= !m;
+    }
+}
+
+/// Цвет пикселя сердца в координатах силуэта (как в blit.wgsl): блик
+/// поверх заливки, обводка по контуру, иначе фон. `fill` — рисовать ли
+/// тело (полное/половина) или пустую ячейку.
+fn heart_pixel(h: &HudStyle, x: i32, y: i32, fill: bool) -> Option<Color32> {
+    if bit_get(&h.heart, x, y) {
+        if fill {
+            if bit_get(&h.glint, x, y) {
+                return Some(rgb(h.highlight));
+            }
+            return Some(rgb(h.full));
+        }
+        return Some(rgb(h.empty));
+    }
+    // Обводка: пустая ячейка рядом с силуэтом.
+    if bit_get(&h.heart, x - 1, y)
+        || bit_get(&h.heart, x + 1, y)
+        || bit_get(&h.heart, x, y - 1)
+        || bit_get(&h.heart, x, y + 1)
+    {
+        return Some(rgb(h.outline));
+    }
+    None
+}
+
+/// Рисует одно сердце масштабом `s` в точке `origin`.
+fn draw_heart(painter: &egui::Painter, origin: Pos2, s: f32, h: &HudStyle, fill: bool) {
+    for y in -1..10 {
+        for x in -1..10 {
+            if let Some(c) = heart_pixel(h, x, y, fill) {
+                let r = Rect::from_min_size(
+                    origin + Vec2::new((x + 1) as f32 * s, (y + 1) as f32 * s),
+                    Vec2::splat(s),
+                );
+                painter.rect_filled(r, 0.0, c);
+            }
+        }
+    }
+}
+
+fn hud_code(h: &HudStyle) -> String {
+    format!(
+        "pub const HUD: HudStyle = HudStyle {{\n    heart: {:?},\n    glint: {:?},\n    full: {:?},\n    empty: {:?},\n    outline: {:?},\n    highlight: {:?},\n    bar_bg: {:?},\n    bar_border: {:?},\n    bar_sel: {:?},\n}};\n",
+        h.heart, h.glint, h.full, h.empty, h.outline, h.highlight, h.bar_bg, h.bar_border, h.bar_sel
+    )
 }
 
 /// Снимает с картинки СТАТИСТИКУ стиля и строит наш дескриптор:

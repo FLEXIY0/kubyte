@@ -5,8 +5,19 @@
 
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
-// HUD: x — здоровье, y — максимум, z — выбранный слот хотбара.
-@group(0) @binding(2) var<uniform> hud: vec4<f32>;
+// Стиль HUD из kb_materials::HUD + динамика (hp/слот). Правится в редакторе.
+struct Hud {
+    hp: vec4<f32>,             // x — здоровье, y — максимум, z — выбранный слот
+    rows: array<vec4<u32>, 9>, // .x — биты сердца, .y — биты блика (9×9)
+    full: vec4<f32>,
+    empty: vec4<f32>,
+    outline: vec4<f32>,
+    highlight: vec4<f32>,
+    bar_bg: vec4<f32>,         // rgb + a (сила наложения подложки)
+    bar_border: vec4<f32>,
+    bar_sel: vec4<f32>,
+};
+@group(0) @binding(2) var<uniform> hud: Hud;
 @group(0) @binding(3) var atlas: texture_2d_array<f32>;
 
 // Масштаб GUI: 1 GUI-пиксель = 2 экранных (дефолт эпохи).
@@ -16,17 +27,18 @@ const GUI: f32 = 2.0;
 // ОБЯЗАН совпадать с kb_render::HOTBAR (см. lib.rs).
 const SLOT_LAYERS = array<i32, 9>(0, 1, 3, 4, 5, 6, -1, -1, -1);
 
-// Сердце 9×9: битовая маска строк (старший бит — левый столбец).
-const HEART = array<u32, 9>(
-    0x0D8u, 0x1FCu, 0x1FCu, 0x1FCu, 0x0F8u, 0x070u, 0x020u, 0x000u, 0x000u,
-);
-
-// Внутри ли (x,y) силуэта сердца.
+// Внутри ли (x,y) силуэта сердца / блика (битмаски из юниформа).
 fn heart_at(x: i32, y: i32) -> bool {
     if x < 0 || x > 8 || y < 0 || y > 8 {
         return false;
     }
-    return ((HEART[y] >> u32(8 - x)) & 1u) == 1u;
+    return ((hud.rows[y].x >> u32(8 - x)) & 1u) == 1u;
+}
+fn glint_at(x: i32, y: i32) -> bool {
+    if x < 0 || x > 8 || y < 0 || y > 8 {
+        return false;
+    }
+    return ((hud.rows[y].y >> u32(8 - x)) & 1u) == 1u;
 }
 
 struct VsOut {
@@ -75,10 +87,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // --- Хотбар: фон 182×22 у нижней кромки -----------------------------
     let hb = vec2(g.x - x0, g.y - (size.y - 22.0));
     if all(hb >= vec2(0.0)) && all(hb < vec2(182.0, 22.0)) {
-        // Рамка и полупрозрачная подложка.
-        color = mix(color, vec3(0.05), 0.78);
+        // Рамка и полупрозрачная подложка (цвета из стиля HUD).
+        color = mix(color, hud.bar_bg.rgb, hud.bar_bg.a);
         if hb.x < 1.0 || hb.x >= 181.0 || hb.y < 1.0 || hb.y >= 21.0 {
-            color = vec3(0.22);
+            color = hud.bar_border.rgb;
         }
         // Иконка блока: слот 20 GUI-px, икона 16×16 внутри.
         let slot = i32(floor((hb.x - 1.0) / 20.0));
@@ -94,12 +106,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
     // Подсветка выбранного слота: рамка 24×24 вокруг ячейки (как в бете).
-    let sel = hud.z;
+    let sel = hud.hp.z;
     let sb = vec2(g.x - (x0 - 1.0 + sel * 20.0), g.y - (size.y - 23.0));
     if all(sb >= vec2(0.0)) && all(sb < vec2(24.0, 23.0)) {
         let edge = sb.x < 1.0 || sb.x >= 23.0 || sb.y < 1.0 || sb.y >= 22.0;
         if edge {
-            color = vec3(0.92);
+            color = hud.bar_sel.rgb;
         }
     }
 
@@ -113,20 +125,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if hi >= 0.0 && hi < 10.0 && hyi >= -1 && hyi <= 9 && hx >= 0 && hx <= 9 {
         let idx = i32(hi);
         if heart_at(hx - 1, hyi) {
-            let full = f32(idx) * 2.0 + 2.0 <= hud.x;
-            let half = !full && f32(idx) * 2.0 + 1.0 <= hud.x && hx <= 4;
+            let full = f32(idx) * 2.0 + 2.0 <= hud.hp.x;
+            let half = !full && f32(idx) * 2.0 + 1.0 <= hud.hp.x && hx <= 4;
             if full || half {
-                color = vec3(0.82, 0.12, 0.14);
-                // Блик: ровный квадрат 2×2 на верхней левой доле.
-                if (hx == 2 || hx == 3) && (hyi == 1 || hyi == 2) {
-                    color = vec3(1.0, 0.66, 0.66);
+                color = hud.full.rgb;
+                // Блик из битмаски стиля (поверх заливки).
+                if glint_at(hx - 1, hyi) {
+                    color = hud.highlight.rgb;
                 }
             } else {
-                color = vec3(0.16, 0.04, 0.05); // пустая ячейка
+                color = hud.empty.rgb; // пустая ячейка
             }
         } else if heart_at(hx - 2, hyi) || heart_at(hx, hyi)
             || heart_at(hx - 1, hyi - 1) || heart_at(hx - 1, hyi + 1) {
-            color = vec3(0.0); // чёрная обводка по всему контуру
+            color = hud.outline.rgb; // обводка по всему контуру
         }
     }
 
