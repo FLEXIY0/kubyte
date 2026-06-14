@@ -95,15 +95,27 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         color = 1.0 - color;
     }
 
-    // --- Хотбар: фон 182×22 у нижней кромки -----------------------------
+    // --- Хотбар: 182×22 у нижней кромки, ячейки «вдавлены» как в классике -
     let hb = vec2(g.x - x0, g.y - (size.y - 22.0));
     if all(hb >= vec2(0.0)) && all(hb < vec2(182.0, 22.0)) {
-        // Рамка и полупрозрачная подложка (цвета из стиля HUD).
-        color = mix(color, hud.bar_bg.rgb, hud.bar_bg.a);
+        let base = hud.bar_bg.rgb;
+        let light = min(base * 1.6 + 0.06, vec3(1.0));
+        let dark = base * 0.45;
+        color = mix(color, base, hud.bar_bg.a);
+        // Внешняя рамка.
         if hb.x < 1.0 || hb.x >= 181.0 || hb.y < 1.0 || hb.y >= 21.0 {
             color = hud.bar_border.rgb;
+        } else {
+            // Ячейка 20px: верх/лево — тень, низ/право — блик (вдавленность).
+            let sx = (hb.x - 1.0) - floor((hb.x - 1.0) / 20.0) * 20.0;
+            let sy = hb.y - 1.0;
+            if sx < 1.0 || sy < 1.0 {
+                color = dark;
+            } else if sx >= 19.0 || sy >= 19.0 {
+                color = light;
+            }
         }
-        // Изо-иконка блока из слота: слот 20 GUI-px, икона 16×16 внутри.
+        // Изо-иконка блока: слот 20 GUI-px, икона 16×16 внутри.
         let slot = i32(floor((hb.x - 1.0) / 20.0));
         let local = vec2(hb.x - 1.0 - f32(slot) * 20.0, hb.y) - vec2(2.0, 3.0);
         if slot >= 0 && slot < 9 && all(local >= vec2(0.0)) && all(local < vec2(16.0)) {
@@ -114,12 +126,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             }
         }
     }
-    // Подсветка выбранного слота: рамка 24×24 вокруг ячейки (как в бете).
+    // Подсветка выбранного слота: яркая рамка 24×24 (2px), как в классике.
     let sel = hud.hp.z;
     let sb = vec2(g.x - (x0 - 1.0 + sel * 20.0), g.y - (size.y - 23.0));
-    if all(sb >= vec2(0.0)) && all(sb < vec2(24.0, 23.0)) {
-        let edge = sb.x < 1.0 || sb.x >= 23.0 || sb.y < 1.0 || sb.y >= 22.0;
-        if edge {
+    if all(sb >= vec2(0.0)) && all(sb < vec2(24.0, 24.0)) {
+        if sb.x < 2.0 || sb.x >= 22.0 || sb.y < 2.0 || sb.y >= 22.0 {
             color = hud.bar_sel.rgb;
         }
     }
@@ -151,19 +162,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // --- Броня: справа над хотбаром (зеркально сердцам, как в бете) -------
-    let ax0 = x0 + 182.0; // правый край хотбара
-    let ai = floor((ax0 - g.x) / 10.0); // отсчёт справа налево
-    let axl = (ax0 - g.x) - ai * 10.0;
-    let ax = 8 - i32(floor(axl)); // зеркалим X
-    if ai >= 0.0 && ai < 10.0 && hyi >= -1 && hyi <= 9 && ax >= 0 && ax <= 9 {
+    // --- Броня: РЯД НАД сердцами, слева (как в бете) — не пересекается ---
+    // Показывается только при наличии брони (как в оригинале).
+    let ay = g.y - (size.y - 43.0);
+    let ayi = i32(floor(ay));
+    let ai = floor((g.x - x0) / 10.0);
+    let ax = i32(floor(g.x - x0 - ai * 10.0));
+    if hud.misc.x > 0.5 && ai >= 0.0 && ai < 10.0 && ayi >= -1 && ayi <= 9 && ax >= 0 && ax <= 9 {
         let idx = i32(ai);
-        if armor_at(ax - 1, hyi) {
-            // Полный щиток, если этот ранг покрыт бронёй (2 ед. = 1 щиток).
+        if armor_at(ax - 1, ayi) {
             let full = f32(idx) * 2.0 + 2.0 <= hud.misc.x;
             color = select(hud.armor_empty.rgb, hud.armor_full.rgb, full);
-        } else if armor_at(ax - 2, hyi) || armor_at(ax, hyi)
-            || armor_at(ax - 1, hyi - 1) || armor_at(ax - 1, hyi + 1) {
+        } else if armor_at(ax - 2, ayi) || armor_at(ax, ayi)
+            || armor_at(ax - 1, ayi - 1) || armor_at(ax - 1, ayi + 1) {
             color = hud.outline.rgb;
         }
     }
