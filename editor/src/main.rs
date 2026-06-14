@@ -77,6 +77,8 @@ struct Editor {
     hud: HudStyle,
     /// Кисть холста сердца: 0 — силуэт, 1 — блик, 2 — стереть.
     hud_brush: u8,
+    /// Режим холста брони: true — стирать, иначе рисовать.
+    armor_erase: bool,
 }
 
 impl Editor {
@@ -118,6 +120,7 @@ impl Editor {
             },
             hud: kb_materials::HUD,
             hud_brush: 0,
+            armor_erase: false,
         }
     }
 
@@ -398,12 +401,24 @@ impl Editor {
                 });
                 self.heart_canvas(&mut c[0]);
 
+                c[0].separator();
+                c[0].horizontal(|ui| {
+                    ui.label("Броня 9×9:");
+                    ui.selectable_value(&mut self.armor_erase, false, "рисовать");
+                    ui.selectable_value(&mut self.armor_erase, true, "стереть");
+                });
+                self.armor_canvas(&mut c[0]);
+
                 let ui = &mut c[1];
                 ui.label("Цвета сердец:");
                 color_row(ui, &mut self.hud.full, "полное");
                 color_row(ui, &mut self.hud.empty, "пустое");
                 color_row(ui, &mut self.hud.outline, "обводка");
                 color_row(ui, &mut self.hud.highlight, "блик");
+                ui.separator();
+                ui.label("Цвета брони:");
+                color_row(ui, &mut self.hud.armor_full, "полная");
+                color_row(ui, &mut self.hud.armor_empty, "пустая");
                 ui.separator();
                 ui.label("Хотбар:");
                 ui.horizontal(|ui| {
@@ -462,6 +477,33 @@ impl Editor {
                         bit_set(&mut self.hud.glint, x, y, false);
                     }
                 }
+            }
+        }
+    }
+
+    /// Холст брони: рисует/стирает биты силуэта нагрудника.
+    fn armor_canvas(&mut self, ui: &mut egui::Ui) {
+        let s = 16.0;
+        let (resp, painter) = ui.allocate_painter(Vec2::splat(s * 9.0), Sense::drag());
+        let origin = resp.rect.min;
+        for y in 0..9 {
+            for x in 0..9 {
+                let r = Rect::from_min_size(
+                    origin + Vec2::new(x as f32 * s, y as f32 * s),
+                    Vec2::splat(s),
+                );
+                let chk = if (x + y) % 2 == 0 { 40 } else { 50 };
+                painter.rect_filled(r, 0.0, Color32::from_gray(chk));
+                if bit_get(&self.hud.armor, x, y) {
+                    painter.rect_filled(r, 0.0, rgb(self.hud.armor_full));
+                }
+            }
+        }
+        if resp.dragged() || resp.is_pointer_button_down_on() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let x = ((p.x - origin.x) / s) as i32;
+                let y = ((p.y - origin.y) / s) as i32;
+                bit_set(&mut self.hud.armor, x, y, !self.armor_erase);
             }
         }
     }
@@ -820,8 +862,9 @@ fn draw_heart(painter: &egui::Painter, origin: Pos2, s: f32, h: &HudStyle, fill:
 
 fn hud_code(h: &HudStyle) -> String {
     format!(
-        "pub const HUD: HudStyle = HudStyle {{\n    heart: {:?},\n    glint: {:?},\n    full: {:?},\n    empty: {:?},\n    outline: {:?},\n    highlight: {:?},\n    bar_bg: {:?},\n    bar_border: {:?},\n    bar_sel: {:?},\n}};\n",
-        h.heart, h.glint, h.full, h.empty, h.outline, h.highlight, h.bar_bg, h.bar_border, h.bar_sel
+        "pub const HUD: HudStyle = HudStyle {{\n    heart: {:?},\n    glint: {:?},\n    full: {:?},\n    empty: {:?},\n    outline: {:?},\n    highlight: {:?},\n    bar_bg: {:?},\n    bar_border: {:?},\n    bar_sel: {:?},\n    armor: {:?},\n    armor_full: {:?},\n    armor_empty: {:?},\n}};\n",
+        h.heart, h.glint, h.full, h.empty, h.outline, h.highlight, h.bar_bg, h.bar_border,
+        h.bar_sel, h.armor, h.armor_full, h.armor_empty
     )
 }
 

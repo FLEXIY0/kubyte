@@ -18,6 +18,9 @@ struct Hud {
     bar_sel: vec4<f32>,
     menu: vec4<f32>,           // x — открыто, y — пункт, z — масштаб, w — дизеринг
     slots: array<vec4<u32>, 9>,// .x — id блока (255 пусто), .y — количество
+    armor_full: vec4<f32>,
+    armor_empty: vec4<f32>,
+    misc: vec4<f32>,           // x — броня 0..20
 };
 @group(0) @binding(2) var<uniform> hud: Hud;
 @group(0) @binding(3) var atlas: texture_2d_array<f32>;
@@ -38,6 +41,12 @@ fn glint_at(x: i32, y: i32) -> bool {
         return false;
     }
     return ((hud.rows[y].y >> u32(8 - x)) & 1u) == 1u;
+}
+fn armor_at(x: i32, y: i32) -> bool {
+    if x < 0 || x > 8 || y < 0 || y > 8 {
+        return false;
+    }
+    return ((hud.rows[y].z >> u32(8 - x)) & 1u) == 1u;
 }
 
 struct VsOut {
@@ -139,6 +148,23 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         } else if heart_at(hx - 2, hyi) || heart_at(hx, hyi)
             || heart_at(hx - 1, hyi - 1) || heart_at(hx - 1, hyi + 1) {
             color = hud.outline.rgb; // обводка по всему контуру
+        }
+    }
+
+    // --- Броня: справа над хотбаром (зеркально сердцам, как в бете) -------
+    let ax0 = x0 + 182.0; // правый край хотбара
+    let ai = floor((ax0 - g.x) / 10.0); // отсчёт справа налево
+    let axl = (ax0 - g.x) - ai * 10.0;
+    let ax = 8 - i32(floor(axl)); // зеркалим X
+    if ai >= 0.0 && ai < 10.0 && hyi >= -1 && hyi <= 9 && ax >= 0 && ax <= 9 {
+        let idx = i32(ai);
+        if armor_at(ax - 1, hyi) {
+            // Полный щиток, если этот ранг покрыт бронёй (2 ед. = 1 щиток).
+            let full = f32(idx) * 2.0 + 2.0 <= hud.misc.x;
+            color = select(hud.armor_empty.rgb, hud.armor_full.rgb, full);
+        } else if armor_at(ax - 2, hyi) || armor_at(ax, hyi)
+            || armor_at(ax - 1, hyi - 1) || armor_at(ax - 1, hyi + 1) {
+            color = hud.outline.rgb;
         }
     }
 

@@ -72,6 +72,9 @@ struct HudUniform {
     menu: [f32; 4],
     // Слоты хотбара: .x — id блока (255 = пусто), .y — количество в стопке.
     slots: [[u32; 4]; SLOTS],
+    armor_full: [f32; 4],
+    armor_empty: [f32; 4],
+    misc: [f32; 4], // x — броня 0..20
 }
 
 fn srgb3(c: [u8; 3]) -> [f32; 4] {
@@ -88,11 +91,13 @@ impl HudUniform {
         gui: u32,
         menu: [f32; 4],
         inv: &Inventory,
+        armor: i8,
     ) -> Self {
         let mut rows = [[0u32; 4]; 9];
         for (i, r) in rows.iter_mut().enumerate() {
             r[0] = style.heart[i] as u32;
             r[1] = style.glint[i] as u32;
+            r[2] = style.armor[i] as u32;
         }
         let mut slots = [[255u32, 0, 0, 0]; SLOTS];
         for (s, item) in slots.iter_mut().zip(&inv.slots) {
@@ -114,6 +119,9 @@ impl HudUniform {
             bar_sel: srgb3(style.bar_sel),
             menu,
             slots,
+            armor_full: srgb3(style.armor_full),
+            armor_empty: srgb3(style.armor_empty),
+            misc: [armor as f32, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -374,6 +382,8 @@ pub struct Gfx {
     mobs: mobs::Mobs,
     /// Здоровье 0..=20; смерть — респавн на точке старта.
     pub hp: i8,
+    /// Броня 0..=20 (полоска брони, как в бете). Предметов брони пока нет.
+    pub armor: i8,
     /// Инвентарь и выбранный слот (заполняется добычей).
     inventory: Inventory,
     pub sel_slot: usize,
@@ -909,6 +919,10 @@ impl Gfx {
             player: kb_core::Player::new(spawn),
             mobs: mobs::Mobs::new(),
             hp: MAX_HP,
+            #[cfg(not(target_arch = "wasm32"))]
+            armor: std::env::var("KB_ARMOR").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            #[cfg(target_arch = "wasm32")]
+            armor: 0,
             inventory: Inventory::default(),
             sel_slot: 0,
             mining: None,
@@ -1231,6 +1245,7 @@ impl Gfx {
             self.gui_scale,
             menu,
             &self.inventory,
+            self.armor,
         );
         self.queue.write_buffer(&self.hud_buf, 0, bytemuck::bytes_of(&hud));
 
